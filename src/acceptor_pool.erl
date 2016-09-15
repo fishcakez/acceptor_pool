@@ -113,6 +113,7 @@ handle_call({detach, SockRef}, _, State) ->
     case remove_socket(SockRef, State) of
         {ok, NState} ->
             demonitor(SockRef, [flush]),
+            %% TODO: Delay reply until no acceptors
             {reply, ok, NState};
         {error, NState} ->
             {reply, {error, not_found}, NState}
