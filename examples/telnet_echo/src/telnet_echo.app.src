@@ -1,0 +1,16 @@
+{application, telnet_echo,
+ [{description, "Telnet echo server"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {telnet_echo_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    acceptor_pool
+   ]},
+  {env,[]},
+  {modules, []},
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
