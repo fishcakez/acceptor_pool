@@ -49,7 +49,7 @@
 -spec spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) -> {Pid, Ref} when
       Mod :: module(),
       SockMod :: module(),
-      SockName :: acceptor_pool:sockname(),
+      SockName :: acceptor_pool:name(),
       LSock :: gen_tcp:socket(),
       Args :: term(),
       Opts :: [option()],
@@ -138,6 +138,7 @@ init_socket(Sock, #{socket_module := SockMod, socket := LSock}) ->
         {error, _} = Error -> Error
     end.
 
+-spec failure(any(), data()) -> no_return().
 failure(timeout, Data) ->
     terminate(normal, Data);
 failure(closed, Data) ->
@@ -152,6 +153,7 @@ failure(Reason, #{socket := LSock} = Data) ->
     gen_tcp:close(LSock),
     terminate(Reason, Data).
 
+-spec terminate(any(), data()) -> no_return().
 terminate(Reason, #{module := Mod, state := State} = Data) ->
     try Mod:terminate(Reason, State) of
         _             -> terminated(Reason, Data)
