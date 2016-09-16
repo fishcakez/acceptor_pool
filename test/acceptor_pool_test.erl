@@ -7,9 +7,9 @@
 
 -export([init/1]).
 
--export([init/3,
-         enter_loop/3,
-         terminate/2]).
+-export([acceptor_init/3,
+         acceptor_continue/3,
+         acceptor_terminate/2]).
 
 start_link(Opts) ->
     acceptor_pool:start_link(?MODULE, Opts).
@@ -18,13 +18,13 @@ init(Opts) ->
     {ok, #{}, [#{id => ?MODULE, start => {?MODULE, [], Opts}}]}.
 
 
-init(_, _, []) ->
+acceptor_init(_, _, []) ->
     {ok, undefined}.
 
-enter_loop(_, Socket, undefined) ->
+acceptor_continue(_, Socket, undefined) ->
     loop(Socket).
 
-terminate(_, _) ->
+acceptor_terminate(_, _) ->
     ok.
 
 loop(Socket) ->
@@ -33,6 +33,5 @@ loop(Socket) ->
             _ = gen_tcp:send(Socket, Data),
             loop(Socket);
         {error, Reason} ->
-            gen_tcp:close(Socket),
             error(Reason, [Socket])
     end.

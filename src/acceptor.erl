@@ -25,7 +25,7 @@
                   socket => gen_tcp:socket(),
                   ack => reference()}.
 
--callback init(SockName, LSock, Args) ->
+-callback acceptor_init(SockName, LSock, Args) ->
     {ok, State} | {ok, State, TimeoutOrHib} | ignore | {error, Reason} when
       SockName :: acceptor_pool:name(),
       LSock :: gen_tcp:socket(),
@@ -34,12 +34,12 @@
       TimeoutOrHib :: timeout() | hibernate,
       Reason :: term().
 
--callback enter_loop(PeerName, Sock, State) -> no_return() when
+-callback acceptor_continue(PeerName, Sock, State) -> no_return() when
       PeerName :: acceptor_pool:name(),
       Sock :: gen_tcp:socket(),
       State :: term().
 
--callback terminate(Reason, State) -> any() when
+-callback acceptor_terminate(Reason, State) -> any() when
       Reason :: normal | system_limit | inet:posix() | term(),
       State :: term().
 
@@ -66,7 +66,7 @@ spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) ->
 %% @private
 init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
     _ = put('$initial_call', {Mod, init, 3}),
-    try Mod:init(SockName, LSock, Args) of
+    try Mod:acceptor_init(SockName, LSock, Args) of
         Result ->
             handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
     catch
@@ -90,7 +90,7 @@ acceptor_continue({ok, Sock}, Parent, Data) ->
     {ok, PeerName} = inet:peername(Sock),
     _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
     case init_socket(Sock, Data) of
-        ok              -> Mod:enter_loop(PeerName, Sock, State);
+        ok              -> Mod:acceptor_continue(PeerName, Sock, State);
         {error, Reason} -> failure(Reason, Data)
     end;
 acceptor_continue({error, Reason}, Parent, #{ack := ARef} = Data) ->
@@ -155,7 +155,7 @@ failure(Reason, #{socket := LSock} = Data) ->
 
 -spec terminate(any(), data()) -> no_return().
 terminate(Reason, #{module := Mod, state := State} = Data) ->
-    try Mod:terminate(Reason, State) of
+    try Mod:acceptor_terminate(Reason, State) of
         _             -> terminated(Reason, Data)
     catch
         throw:_       -> terminated(Reason, Data);
