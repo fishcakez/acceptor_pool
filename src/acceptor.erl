@@ -152,11 +152,24 @@ failure(Reason, #{socket := LSock} = Data) ->
     gen_tcp:close(LSock),
     terminate(Reason, Data).
 
-%% TODO: log abnormal exits
-terminate(Reason, #{module := Mod, state := State}) ->
-    try
-        Mod:terminate(Reason, State)
+terminate(Reason, #{module := Mod, state := State} = Data) ->
+    try Mod:terminate(Reason, State) of
+        _             -> terminated(Reason, Data)
     catch
-        throw:_       -> exit(Reason);
-        error:NReason -> exit({NReason, erlang:get_stacktrace()})
+        throw:_       -> terminated(Reason, Data);
+        exit:NReason  -> terminated(NReason, Data);
+        error:NReason -> terminated({NReason, erlang:get_stacktrace()}, Data)
     end.
+
+terminated(normal, _) ->
+    exit(normal);
+terminated(shutdown, _) ->
+    exit(shutdown);
+terminated({shutdown, _} = Shutdown, _) ->
+    exit(Shutdown);
+terminated(Reason, #{module := Mod, state := State}) ->
+    Msg = "** Acceptor ~p terminating~n"
+          "** When acceptor state == ~p~n"
+          "** Reason for termination ==~n** ~p~n",
+    error_logger:format(Msg, [{self(), Mod}, State]),
+    exit(Reason).
