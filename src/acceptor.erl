@@ -26,11 +26,12 @@
                   ack => reference()}.
 
 -callback init(SockName, LSock, Args) ->
-    {ok, State} | ignore | {error, Reason} when
+    {ok, State} | {ok, State, TimeoutOrHib} | ignore | {error, Reason} when
       SockName :: acceptor_pool:name(),
       LSock :: gen_tcp:socket(),
       Args :: term(),
       State :: term(),
+      TimeoutOrHib :: timeout() | hibernate,
       Reason :: term().
 
 -callback enter_loop(PeerName, Sock, State) -> no_return() when
@@ -81,7 +82,7 @@ init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
 -spec acceptor_continue({ok, Sock} | {error, Reason}, Parent, Data) ->
     no_return() when
       Sock :: gen_tcp:socket(),
-      Reason :: closed | system_limit | inet:posix(),
+      Reason :: timeout | closed | system_limit | inet:posix(),
       Parent :: pid(),
       Data :: data().
 acceptor_continue({ok, Sock}, Parent, Data) ->
@@ -112,10 +113,12 @@ spawn_options(Opts) ->
     end.
 
 handle_init({ok, State}, Mod, SockMod, LSock, Parent, AckRef) ->
+    handle_init({ok, State, infinity}, Mod, SockMod, LSock, Parent, AckRef);
+handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef) ->
     Data = #{module => Mod, state => State, socket_module => SockMod,
              socket => LSock, ack => AckRef},
     % Use another module to accept so can reload this module.
-    acceptor_loop:accept(LSock, Parent, ?MODULE, Data);
+    acceptor_loop:accept(LSock, Timeout, Parent, ?MODULE, Data);
 handle_init(Other, _, _, _, _, _) ->
     handle_init(Other).
 
@@ -135,14 +138,16 @@ init_socket(Sock, #{socket_module := SockMod, socket := LSock}) ->
         {error, _} = Error -> Error
     end.
 
+failure(timeout, Data) ->
+    terminate(normal, Data);
+failure(closed, Data) ->
+    terminate(normal, Data);
 failure(einval, #{socket := LSock} = Data) ->
-    % LSock could have died
+    % LSock could have closed
     case erlang:port_info(LSock, connected) of
         {connected, _} -> terminate(einval, Data);
         undefined      -> terminate(normal, Data)
     end;
-failure(closed, Data) ->
-    terminate(closed, Data);
 failure(Reason, #{socket := LSock} = Data) ->
     gen_tcp:close(LSock),
     terminate(Reason, Data).
