@@ -65,7 +65,7 @@ spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) ->
 
 %% @private
 init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
-    _ = put('$initial_call', {Mod, init, 1}),
+    _ = put('$initial_call', {Mod, init, 3}),
     try Mod:init(SockName, LSock, Args) of
         Result ->
             handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
