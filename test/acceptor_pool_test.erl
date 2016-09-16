@@ -8,7 +8,7 @@
 -export([init/1]).
 
 -export([init/3,
-         enter_loop/2,
+         enter_loop/3,
          terminate/2]).
 
 start_link(Opts) ->
@@ -21,7 +21,7 @@ init(Opts) ->
 init(_, _, []) ->
     {ok, undefined}.
 
-enter_loop(Socket, undefined) ->
+enter_loop(_, Socket, undefined) ->
     loop(Socket).
 
 terminate(_, _) ->

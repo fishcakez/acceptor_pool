@@ -6,8 +6,7 @@
 
 -export([start_link/2,
          start_link/3,
-         attach/3,
-         detach/2]).
+         attach/3]).
 
 %% gen_server api
 
@@ -26,20 +25,20 @@
 -type acceptor_spec() :: #{id := term(),
                            start := {module(), any(), [acceptor:option()]}}.
 
--type sockname() ::
+-type name() ::
     {inet:ip_address(), inet:port_number()} | inet:returned_non_ip_address().
 
 -export_type([pool/0,
               pool_flags/0,
               acceptor_spec/0,
-              sockname/0]).
+              name/0]).
 
 -record(state, {name,
                 mod :: module(),
                 args :: any(),
                 start :: {module(), any(), [acceptor:option()]},
                 sockets = #{} :: #{reference() =>
-                                   {sockname(), gen_tcp:socket()}},
+                                   {module(), name(), gen_tcp:socket()}},
                 acceptors = #{} :: #{reference() => reference()},
                 conns = #{} :: #{pid() => reference()}}).
 
@@ -78,12 +77,6 @@ attach(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
     gen_server:call(Pool, {attach, Sock, Acceptors}, infinity).
 
--spec detach(Pool, Ref) -> ok | {error, not_found} when
-      Pool :: pool(),
-      Ref :: reference().
-detach(Pool, Ref) ->
-    gen_server:call(Pool, {detach, Ref}, infinity).
-
 %% gen_server api
 
 %% @private
@@ -101,23 +94,15 @@ init({Name, Mod, Args}) ->
 
 handle_call({attach, Sock, Acceptors}, _, State) ->
     SockRef = monitor(port, Sock),
-    case inet:sockname(Sock) of
-        {ok, SockName} ->
-            NState = start_conns(SockRef, SockName, Sock, Acceptors, State),
+    case socket_info(Sock) of
+        {ok, SockInfo} ->
+            NState = start_conns(SockRef, SockInfo, Acceptors, State),
             {reply, {ok, SockRef}, NState};
         {error, _} = Error ->
             demonitor(SockRef, [flush]),
             {reply, Error, State}
-    end;
-handle_call({detach, SockRef}, _, State) ->
-    case remove_socket(SockRef, State) of
-        {ok, NState} ->
-            demonitor(SockRef, [flush]),
-            %% TODO: Delay reply until no acceptors
-            {reply, ok, NState};
-        {error, NState} ->
-            {reply, {error, not_found}, NState}
     end.
+
 
 handle_cast(Req, State) ->
     {stop, {bad_cast, Req}, State}.
@@ -142,9 +127,8 @@ handle_info({'DOWN', AcceptRef, process, _, _},
         error ->
             {noreply, State}
     end;
-handle_info({'DOWN', SockRef, port, _, _}, State) ->
-    {_, NState} = remove_socket(SockRef, State),
-    {noreply, NState};
+handle_info({'DOWN', SockRef, port, _, _}, #state{sockets=Sockets} = State) ->
+    {noreply, State#state{sockets=maps:remove(SockRef, Sockets)}};
 handle_info(_, State) ->
     % TODO: log unexpected message
     {noreply, State}.
@@ -177,39 +161,36 @@ init(_, _, _, ignore) ->
 init(_, Mod, _, Other) ->
     {stop, {bad_return, {Mod, init, Other}}}.
 
+socket_info(Sock) ->
+    case inet_db:lookup_socket(Sock) of
+        {ok, SockMod}      -> socket_info(SockMod, Sock);
+        {error, _} = Error -> Error
+    end.
 
-start_conns(SockRef, SockName, Sock, NumAcceptors, State) ->
-    #state{sockets=Sockets, acceptors=Acceptors, conns=Conns,
-           start=Start} = State,
-    {NAcceptors, NConns} = start_conns(SockRef, SockName, Sock, Start,
-                                       NumAcceptors, Acceptors, Conns),
-    State#state{sockets=Sockets#{SockRef => {SockName, Sock}},
-                acceptors=NAcceptors, conns=NConns}.
+socket_info(SockMod, Sock) ->
+    case inet:sockname(Sock) of
+        {ok, SockName}     -> {ok, {SockMod, SockName, Sock}};
+        {error, _} = Error -> Error
+    end.
 
-start_conns(_, _, _, _, 0, Acceptors, Conns) ->
-    {Acceptors, Conns};
-start_conns(SockRef, SockName, Sock, Start, N, Acceptors, Conns) ->
-    {Mod, Args, Opts} = Start,
-    {Pid, AcceptRef} = acceptor:spawn_opt(Mod, SockName, Sock, Args, Opts),
-    NAcceptors = Acceptors#{AcceptRef => SockRef},
-    NConns = Conns#{Pid => SockRef},
-    start_conns(SockRef, SockName, Sock, Start, N-1, NAcceptors, NConns).
+start_conns(SockRef, SockInfo, NumAcceptors, #state{sockets=Sockets} = State) ->
+    NState = State#state{sockets=Sockets#{SockRef => SockInfo}},
+    start_conns(SockRef, NumAcceptors, NState).
+
+start_conns(_, 0, State) ->
+    State;
+start_conns(SockRef, N, #state{acceptors=Acceptors} = State) ->
+    start_conns(SockRef, N-1, start_conn(SockRef, Acceptors, State)).
 
 start_conn(SockRef, Acceptors,
            #state{sockets=Sockets, start={Mod, Args, Opts},
                   conns=Conns} = State) ->
     case Sockets of
-        #{SockRef := {SockName, Sock}} ->
+        #{SockRef := {SockMod, SockName, Sock}} ->
             {Pid, AcceptRef} =
-                acceptor:spawn_opt(Mod, SockName, Sock, Args, Opts),
+                acceptor:spawn_opt(Mod, SockMod, SockName, Sock, Args, Opts),
             State#state{acceptors=Acceptors#{AcceptRef => SockRef},
                         conns=Conns#{Pid => SockRef}};
         _ ->
             State#state{acceptors=Acceptors}
-    end.
-
-remove_socket(SockRef, #state{sockets=Sockets} = State) ->
-    case maps:take(SockRef, Sockets) of
-        {_, NSockets} -> {ok, State#state{sockets=NSockets}};
-        error         -> {error, State}
     end.

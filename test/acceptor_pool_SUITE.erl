@@ -16,13 +16,12 @@
 %% test cases
 
 -export([accept/1,
-         close_listener/1,
-         detach_listener/1]).
+         close_listener/1]).
 
 %% common_test api
 
 all() ->
-    [accept, close_listener, detach_listener].
+    [accept, close_listener].
 
 suite() ->
     [{timetrap, {seconds, 15}}].
@@ -61,25 +60,6 @@ accept(Config) ->
     ok.
 
 close_listener(Config) ->
-    Connect = ?config(connect, Config),
-    {ok, ClientA} = Connect(),
-
-    LSock = ?config(listener, Config),
-    ok = gen_tcp:close(LSock),
-
-    {error, _} = Connect(),
-
-    ok = gen_tcp:send(ClientA, "hello"),
-    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
-    ok = gen_tcp:close(ClientA),
-
-    ok.
-
-detach_listener(Config) ->
-    Pool = ?config(pool, Config),
-    Ref = ?config(ref, Config),
-    ok = acceptor_pool:detach(Pool, Ref),
-
     Connect = ?config(connect, Config),
     {ok, ClientA} = Connect(),
 
