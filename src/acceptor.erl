@@ -8,7 +8,7 @@
 
 %% private api
 
--export([init_it/6]).
+-export([init_it/7]).
 
 %% acceptor_loop api
 
@@ -55,28 +55,24 @@
       Pid :: pid(),
       Ref :: reference().
 spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) ->
-    SRef = make_ref(),
-    SArgs = [SRef, Mod, SockMod, SockName, LSock, Args],
+    AckRef = make_ref(),
+    SArgs = [self(), AckRef, Mod, SockMod, SockName, LSock, Args],
     Pid = proc_lib:spawn_opt(?MODULE, init_it, SArgs, spawn_options(Opts)),
-    AckRef = monitor(process, Pid),
-    _ = Pid ! {ack, SRef, self(), AckRef},
     {Pid, AckRef}.
 
 %% private api
 
 %% @private
-init_it(SRef, Mod, SockMod, SockName, LSock, Args) ->
-    receive
-        {ack, SRef, Parent, AckRef} ->
-            try Mod:init(SockName, LSock, Args) of
-                Result       ->
-                    handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
-            catch
-                throw:Result ->
-                    handle_init(Result, Mod, SockMod, LSock, Parent, AckRef);
-                error:Reason ->
-                    exit({Reason, erlang:get_stacktrace()})
-            end
+init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
+    _ = put('$initial_call', {Mod, init, 1}),
+    try Mod:init(SockName, LSock, Args) of
+        Result ->
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
+    catch
+        throw:Result ->
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef);
+        error:Reason ->
+            exit({Reason, erlang:get_stacktrace()})
     end.
 
 %% acceptor_loop api
@@ -90,13 +86,14 @@ init_it(SRef, Mod, SockMod, SockName, LSock, Args) ->
       Data :: data().
 acceptor_continue({ok, Sock}, Parent, Data) ->
     #{module := Mod, state := State, ack := AckRef} = Data,
-    _ = Parent ! {'ACCEPT', AckRef},
     {ok, PeerName} = inet:peername(Sock),
+    _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
     case init_socket(Sock, Data) of
         ok              -> Mod:enter_loop(PeerName, Sock, State);
         {error, Reason} -> failure(Reason, Data)
     end;
-acceptor_continue({error, Reason}, _, Data) ->
+acceptor_continue({error, Reason}, Parent, #{ack := ARef} = Data) ->
+    _ = Parent ! {'CANCEL', self(), ARef},
     failure(Reason, Data).
 
 -spec acceptor_terminate(Reason, Parent, Data) -> no_return() when

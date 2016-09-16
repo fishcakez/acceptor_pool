@@ -7,6 +7,7 @@
 %% common_test api
 
 -export([all/0,
+         groups/0,
          suite/0,
          init_per_suite/1,
          end_per_suite/1,
@@ -16,12 +17,19 @@
 %% test cases
 
 -export([accept/1,
-         close_listener/1]).
+         close_listener/1,
+         which_children/1,
+         count_children/1,
+         format_status/1]).
 
 %% common_test api
 
 all() ->
-    [accept, close_listener].
+    [{group, tcp}, {group, supervisor}].
+
+groups() ->
+    [{tcp, [parallel], [accept, close_listener]},
+     {supervisor, [parallel], [which_children, count_children, format_status]}].
 
 suite() ->
     [{timetrap, {seconds, 15}}].
@@ -71,5 +79,72 @@ close_listener(Config) ->
     ok = gen_tcp:send(ClientA, "hello"),
     {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
     ok = gen_tcp:close(ClientA),
+
+    ok.
+
+which_children(Config) ->
+    Pool = ?config(pool, Config),
+
+    [] = acceptor_pool:which_children(Pool),
+
+    Connect = ?config(connect, Config),
+    {ok, ClientA} = Connect(),
+
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, {_, _}, {_,_}, _}, Pid, worker,
+      [acceptor_pool_test]}] = acceptor_pool:which_children(Pool),
+
+    Ref = monitor(process, Pid),
+
+    ok = gen_tcp:close(ClientA),
+
+    receive {'DOWN', Ref, _, _, _} -> ok end,
+
+    [] = acceptor_pool:which_children(Pool),
+
+    ok.
+
+count_children(Config) ->
+    Pool = ?config(pool, Config),
+
+    % workers is 1 because 1 acceptor
+    [{specs, 1}, {active, 0}, {supervisors, 0}, {workers, 1}] =
+        acceptor_pool:count_children(Pool),
+
+    Connect = ?config(connect, Config),
+    {ok, ClientA} = Connect(),
+
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    % workers is 2 because 1 active connection and 1 acceptor
+    [{specs, 1}, {active, 1}, {supervisors, 0}, {workers, 2}] =
+        acceptor_pool:count_children(Pool),
+
+    [{_, Pid, _, _}] = acceptor_pool:which_children(Pool),
+
+    Ref = monitor(process, Pid),
+
+    ok = gen_tcp:close(ClientA),
+
+    receive {'DOWN', Ref, _, _, _} -> ok end,
+
+    % workers is 1 because 1 acceptor
+    [{specs, 1}, {active, 0}, {supervisors, 0}, {workers, 1}] =
+        acceptor_pool:count_children(Pool),
+
+    ok.
+
+format_status(Config) ->
+    Pool = ?config(pool, Config),
+
+    {status, Pool, {module, _}, Items} = sys:get_status(Pool),
+
+    [_PDict, running, _Parent, [], Misc] = Items,
+
+    {supervisor, [{"Callback", acceptor_pool_test}]} =
+        lists:keyfind(supervisor, 1, Misc),
 
     ok.

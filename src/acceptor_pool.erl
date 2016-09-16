@@ -8,6 +8,11 @@
          start_link/3,
          attach/3]).
 
+%% supervisor api
+
+-export([which_children/1,
+         count_children/1]).
+
 %% gen_server api
 
 -export([init/1]).
@@ -15,6 +20,7 @@
 -export([handle_cast/2]).
 -export([handle_info/2]).
 -export([code_change/3]).
+-export([format_status/2]).
 -export([terminate/2]).
 
 -type pool() :: pid() | atom() | {atom(), node()} | {via, module(), any()} |
@@ -23,7 +29,9 @@
 -type pool_flags() :: #{}.
 
 -type acceptor_spec() :: #{id := term(),
-                           start := {module(), any(), [acceptor:option()]}}.
+                           start := {module(), any(), [acceptor:option()]},
+                           type => worker | supervisor,
+                           modules => [module()] | dynamic}.
 
 -type name() ::
     {inet:ip_address(), inet:port_number()} | inet:returned_non_ip_address().
@@ -36,11 +44,15 @@
 -record(state, {name,
                 mod :: module(),
                 args :: any(),
+                id :: term(),
                 start :: {module(), any(), [acceptor:option()]},
+                type :: worker | supervisor,
+                modules :: [module()] | dynamic,
                 sockets = #{} :: #{reference() =>
                                    {module(), name(), gen_tcp:socket()}},
-                acceptors = #{} :: #{reference() => reference()},
-                conns = #{} :: #{pid() => reference()}}).
+                acceptors = #{} :: #{pid() =>
+                                     {reference(), name(), reference()}},
+                conns = #{} :: #{pid() => {name(), name(), reference()}}}).
 
 -callback init(Args) -> {ok, PoolFlags, [AcceptorSpec, ...]} | ignore when
       Args :: any(),
@@ -77,6 +89,21 @@ attach(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
     gen_server:call(Pool, {attach, Sock, Acceptors}, infinity).
 
+-spec which_children(Pool) -> [{Id, Child, Type, Modules}] when
+      Pool :: pool(),
+      Id :: {term(), name(), name(), reference()},
+      Child :: pid(),
+      Type :: worker | supervisor,
+      Modules :: [module()] | dynamic.
+which_children(Pool) ->
+    gen_server:call(Pool, which_children, infinity).
+
+-spec count_children(Pool) -> Counts when
+      Pool :: pool(),
+      Counts :: [{spec, active | workers | supervisors, non_neg_integer()}].
+count_children(Pool) ->
+    gen_server:call(Pool, count_children, infinity).
+
 %% gen_server api
 
 %% @private
@@ -92,39 +119,47 @@ init({Name, Mod, Args}) ->
             init(Name, Mod, Args, Res)
     end.
 
-handle_call({attach, Sock, Acceptors}, _, State) ->
+handle_call({attach, Sock, NumAcceptors}, _, State) ->
     SockRef = monitor(port, Sock),
     case socket_info(Sock) of
         {ok, SockInfo} ->
-            NState = start_conns(SockRef, SockInfo, Acceptors, State),
+            NState = start_acceptors(SockRef, SockInfo, NumAcceptors, State),
             {reply, {ok, SockRef}, NState};
         {error, _} = Error ->
             demonitor(SockRef, [flush]),
             {reply, Error, State}
-    end.
-
+    end;
+handle_call(which_children, _, State) ->
+    #state{conns=Conns, id=Id, type=Type, modules=Modules} = State,
+    Children = [{{Id, PeerName, SockName, Ref}, Pid, Type, Modules} ||
+                {Pid, {PeerName, SockName, Ref}} <- maps:to_list(Conns)],
+    {reply, Children, State};
+handle_call(count_children, _, State) ->
+    {reply, count(State), State}.
 
 handle_cast(Req, State) ->
     {stop, {bad_cast, Req}, State}.
 
-%% TODO: Reply to {which|count}_children supervisor calls
-handle_info({'EXIT', Conn, _}, #state{conns=Conns} = State) ->
-    {noreply, State#state{conns=maps:remove(Conn, Conns)}};
-handle_info({'ACCEPT', AcceptRef}, #state{acceptors=Acceptors} = State) ->
-    case maps:take(AcceptRef, Acceptors) of
-        {SockRef, NAcceptors} ->
-            NState = start_conn(SockRef, NAcceptors, State),
-            demonitor(AcceptRef, [flush]),
-            {noreply, NState};
+handle_info({'EXIT', Conn, _}, State) ->
+    handle_exit(Conn, State);
+handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
+    #state{acceptors=Acceptors, conns=Conns} = State,
+    case maps:take(Pid, Acceptors) of
+        {{SockRef, SockName, AcceptRef}, NAcceptors} ->
+            NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
+            NConns = Conns#{Pid => {PeerName, SockName, AcceptRef}},
+            {noreply, State#state{acceptors=NAcceptors2, conns=NConns}};
         error ->
             {noreply, State}
     end;
-handle_info({'DOWN', AcceptRef, process, _, _},
-            #state{acceptors=Acceptors} = State) ->
-    case maps:take(AcceptRef, Acceptors) of
-        {SockRef, NAcceptors} ->
-            {noreply, start_conn(SockRef, NAcceptors, State)};
-        error ->
+handle_info({'CANCEL', Pid, AcceptRef}, State) ->
+    #state{acceptors=Acceptors} = State,
+    case Acceptors of
+        #{Pid := {SockRef, SockName, AcceptRef}} ->
+            NAcceptors = start_acceptor(SockRef, Acceptors, State),
+            PidInfo = {undefined, SockName, AcceptRef},
+            {noreply, State#state{acceptors=NAcceptors#{Pid := PidInfo}}};
+        _ ->
             {noreply, State}
     end;
 handle_info({'DOWN', SockRef, port, _, _}, #state{sockets=Sockets} = State) ->
@@ -137,6 +172,11 @@ code_change(_, State, _) ->
     % TODO: Support supervisor style reconfiguration with code change
     {ok, State}.
 
+format_status(terminate, [_, State]) ->
+    State;
+format_status(_, [_, #state{mod=Mod} = State]) ->
+    [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
+
 terminate(_, #state{conns=Conns}) ->
     _ = [exit(Conn, shutdown) || {Conn, _} <- maps:to_list(Conns)],
     terminate(Conns).
@@ -145,6 +185,7 @@ terminate(_, #state{conns=Conns}) ->
 
 terminate(Conns) ->
     % TODO: send supervisor_report for abnormal exit
+    % TODO: shutdown like a supervisor
     Conn = receive {'EXIT', Pid, _} -> Pid end,
     case maps:remove(Conn, Conns) of
         NConns when map_size(NConns) == 0 ->
@@ -153,13 +194,28 @@ terminate(Conns) ->
             terminate(NConns)
     end.
 
-%% TODO: Handle some pool flags and acceptor specs
-init(Name, Mod, Args, {ok, #{}, [#{start := {_, _, _} = Start}]}) ->
-    {ok, #state{name=Name, mod=Mod, args=Args, start=Start}};
+%% TODO: Handle pool flags and acceptor specs
+init(Name, Mod, Args,
+     {ok, #{}, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}) ->
+    Type = maps:get(type, Spec, worker),
+    Modules = maps:get(modules, Spec, [AMod]),
+    State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start, type=Type,
+                   modules=Modules},
+    {ok, State};
 init(_, _, _, ignore) ->
     ignore;
 init(_, Mod, _, Other) ->
     {stop, {bad_return, {Mod, init, Other}}}.
+
+count(#state{conns=Conns, acceptors=Acceptors, type=Type}) ->
+    Active = maps:size(Conns),
+    Size = Active + maps:size(Acceptors),
+    case Type of
+        worker ->
+            [{specs, 1}, {active, Active}, {supervisors, 0}, {workers, Size}];
+        supervisor ->
+            [{specs, 1}, {active, Active}, {supervisors, Size}, {workers, 0}]
+    end.
 
 socket_info(Sock) ->
     case inet_db:lookup_socket(Sock) of
@@ -173,24 +229,41 @@ socket_info(SockMod, Sock) ->
         {error, _} = Error -> Error
     end.
 
-start_conns(SockRef, SockInfo, NumAcceptors, #state{sockets=Sockets} = State) ->
+start_acceptors(SockRef, SockInfo, NumAcceptors, State) ->
+    #state{sockets=Sockets, acceptors=Acceptors} = State,
     NState = State#state{sockets=Sockets#{SockRef => SockInfo}},
-    start_conns(SockRef, NumAcceptors, NState).
+    NAcceptors= start_loop(SockRef, NumAcceptors, Acceptors, NState),
+    NState#state{acceptors=NAcceptors}.
 
-start_conns(_, 0, State) ->
-    State;
-start_conns(SockRef, N, #state{acceptors=Acceptors} = State) ->
-    start_conns(SockRef, N-1, start_conn(SockRef, Acceptors, State)).
+start_loop(_, 0, Acceptors, _) ->
+    Acceptors;
+start_loop(SockRef, N, Acceptors, State) ->
+    start_loop(SockRef, N-1, start_acceptor(SockRef, Acceptors, State), State).
 
-start_conn(SockRef, Acceptors,
-           #state{sockets=Sockets, start={Mod, Args, Opts},
-                  conns=Conns} = State) ->
+start_acceptor(SockRef, Acceptors,
+               #state{sockets=Sockets, start={Mod, Args, Opts}}) ->
     case Sockets of
         #{SockRef := {SockMod, SockName, Sock}} ->
             {Pid, AcceptRef} =
                 acceptor:spawn_opt(Mod, SockMod, SockName, Sock, Args, Opts),
-            State#state{acceptors=Acceptors#{AcceptRef => SockRef},
-                        conns=Conns#{Pid => SockRef}};
+            Acceptors#{Pid => {SockRef, SockName, AcceptRef}};
         _ ->
-            State#state{acceptors=Acceptors}
+            Acceptors
+    end.
+
+handle_exit(Pid, #state{conns=Conns} = State) ->
+    case maps:take(Pid, Conns) of
+        {_, NConns} ->
+            {noreply, State#state{conns=NConns}};
+        error ->
+            acceptor_exit(Pid, State)
+    end.
+
+acceptor_exit(Pid, #state{acceptors=Acceptors} = State) ->
+    case maps:take(Pid, Acceptors) of
+        {{SockRef, _, _}, NAcceptors} ->
+            NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
+            {noreply, State#state{acceptors=NAcceptors2}};
+        error ->
+            {noreply, State}
     end.
