@@ -164,8 +164,8 @@ handle_info({'CANCEL', Pid, AcceptRef}, State) ->
     end;
 handle_info({'DOWN', SockRef, port, _, _}, #state{sockets=Sockets} = State) ->
     {noreply, State#state{sockets=maps:remove(SockRef, Sockets)}};
-handle_info(_, State) ->
-    % TODO: log unexpected message
+handle_info(Msg, #state{name=Name} = State) ->
+    error_logger:error_msg("~p received unexpected message: ~p~n", [Name, Msg]),
     {noreply, State}.
 
 code_change(_, State, _) ->
