@@ -196,7 +196,7 @@ terminate(Conns) ->
 
 %% TODO: Handle pool flags and acceptor specs
 init(Name, Mod, Args,
-     {ok, #{}, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}) ->
+     {ok, {#{}, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}}) ->
     Type = maps:get(type, Spec, worker),
     Modules = maps:get(modules, Spec, [AMod]),
     State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start, type=Type,

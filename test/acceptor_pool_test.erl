@@ -15,7 +15,7 @@ start_link(Opts) ->
     acceptor_pool:start_link(?MODULE, Opts).
 
 init(Opts) ->
-    {ok, #{}, [#{id => ?MODULE, start => {?MODULE, [], Opts}}]}.
+    {ok, {#{}, [#{id => ?MODULE, start => {?MODULE, [], Opts}}]}}.
 
 
 acceptor_init(_, _, []) ->
