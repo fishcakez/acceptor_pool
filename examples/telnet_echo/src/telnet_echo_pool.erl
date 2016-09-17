@@ -23,5 +23,6 @@ accept_socket(Socket, Acceptors) ->
 
 init([]) ->
     Conn = #{id => telnet_echo_conn,
-             start => {telnet_echo_conn, [], []}},
+             start => {telnet_echo_conn, [], []},
+             grace => 5000}, % Give connections 5000ms to close before shutdown
     {ok, {#{}, [Conn]}}.

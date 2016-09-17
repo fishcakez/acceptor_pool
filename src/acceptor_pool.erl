@@ -34,6 +34,7 @@
                            start := {module(), any(), [acceptor:option()]},
                            restart => permanent | transient | temporary,
                            shutdown => timeout() | brutal_kill,
+                           grace => timeout(),
                            type => worker | supervisor,
                            modules => [module()] | dynamic}.
 
@@ -52,6 +53,7 @@
                 start :: {module(), any(), [acceptor:option()]},
                 restart :: permanent | transient | temporary,
                 shutdown :: timeout() | brutal_kill,
+                grace :: timeout(),
                 type :: worker | supervisor,
                 modules :: [module()] | dynamic,
                 intensity :: non_neg_integer(),
@@ -206,21 +208,23 @@ format_status(terminate, [_, State]) ->
 format_status(_, [_, #state{mod=Mod} = State]) ->
     [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
 
-terminate(_, #state{conns=Conns, acceptors=Acceptors, shutdown=brutal_kill}) ->
+terminate(_, #state{conns=Conns, acceptors=Acceptors, grace=Grace,
+                    shutdown=Shutdown}) ->
     Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
-    MRefs = monitor_and_exit(kill, Pids),
-    await_down(make_ref(), MRefs);
-terminate(_, #state{conns=Conns, acceptors=Acceptors, shutdown=Shutdown}) ->
-    Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
-    MRefs = monitor_and_exit(shutdown, Pids),
-    case Shutdown of
-        infinity -> await_down(make_ref(), MRefs);
-        Timeout  -> await_down(erlang:start_timer(Timeout, self(), kill), MRefs)
+    MRefs = maps:from_list([{monitor(process, Pid), Pid} || Pid <- Pids]),
+    case Grace of
+        infinity ->
+            await_down(make_ref(), MRefs);
+        _ when Shutdown /= brutal_kill ->
+            Timer = erlang:start_timer(Grace, self(), {shutdown, Shutdown}),
+            await_down(Timer, MRefs);
+        _ when Shutdown == brutal_kill ->
+            Timer = erlang:start_timer(Grace, self(), brutal_kill),
+            await_down(Timer, MRefs)
     end.
 
 %% internal
 
-%% TODO: Support grace acceptor spec
 init(Name, Mod, Args,
      {ok,
       {#{} = Flags, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}}) ->
@@ -230,9 +234,10 @@ init(Name, Mod, Args,
     Restart = maps:get(restart, Spec, temporary),
     Type = maps:get(type, Spec, worker),
     Shutdown = maps:get(shutdown, Spec, shutdown_default(Type)),
+    Grace = maps:get(grace, Spec, 0),
     Modules = maps:get(modules, Spec, [AMod]),
     State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start,
-                   restart=Restart, shutdown=Shutdown, type=Type,
+                   restart=Restart, shutdown=Shutdown, grace=Grace, type=Type,
                    modules=Modules, intensity=Intensity, period=Period},
     {ok, State};
 init(_, _, _, ignore) ->
@@ -351,23 +356,26 @@ drop_restarts(Stale, Restarts) ->
         Time when Time < Stale  -> drop_restarts(Stale, queue:drop(Restarts))
     end.
 
-monitor_and_exit(Reason, Pids) ->
-    maps:from_list([do_monitor_and_exit(Pid, Reason) || Pid <- Pids]).
-
-do_monitor_and_exit(Pid, Reason) ->
-    MRef = monitor(process, Pid),
-    exit(Pid, Reason),
-    {MRef, Pid}.
-
 await_down(Timer, MRefs) when map_size(MRefs) > 0 ->
     receive
-        {'DOWN', MRef, _, _, _} -> await_down(Timer, maps:remove(MRef, MRefs));
-        {timeout, Timer, kill}  -> await_down(Timer, kill(MRefs));
-        _                       -> await_down(Timer, MRefs)
+        {'DOWN', MRef, _, _, _} ->
+            await_down(Timer, maps:remove(MRef, MRefs));
+        {timeout, Timer, brutal_kill}  ->
+            exits(kill, MRefs),
+            await_down(Timer, MRefs);
+        {timeout, Timer, {shutdown, infinity}} ->
+            exits(shutdown, MRefs),
+            await_down(Timer, MRefs);
+        {timeout, Timer, {shutdown, Timeout}} ->
+            exits(shutdown, MRefs),
+            NTimer = erlang:start_timer(Timeout, self(), brutal_kill),
+            await_down(NTimer, MRefs);
+        _ ->
+            await_down(Timer, MRefs)
     end;
 await_down(_, _) ->
     ok.
 
-kill(MRefs) ->
-    _ = [exit(Pid, kill) || Pid <- maps:values(MRefs)],
-    MRefs.
+exits(Reason, MRefs) ->
+    _ = [exit(Pid, Reason) || Pid <- maps:values(MRefs)],
+    ok.

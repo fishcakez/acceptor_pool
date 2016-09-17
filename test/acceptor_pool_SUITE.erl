@@ -29,7 +29,8 @@
          permanent_shutdown/1,
          transient_shutdown/1,
          shutdown_children/1,
-         kill_children/1]).
+         kill_children/1,
+         grace_children/1]).
 
 %% common_test api
 
@@ -48,8 +49,10 @@ groups() ->
      {permanent, [start_error, child_error, permanent_shutdown]},
      {transient, [start_error, child_error, transient_shutdown]},
      {temporary, [start_error]},
-     {shutdown_timeout, [shutdown_children, kill_children]},
-     {brutal_kill, [shutdown_children, kill_children]}].
+     {shutdown_timeout, [parallel],
+      [shutdown_children, kill_children, grace_children]},
+     {brutal_kill, [parallel],
+      [shutdown_children, kill_children, grace_children]}].
 
 suite() ->
     [{timetrap, {seconds, 15}}].
@@ -72,6 +75,7 @@ init_per_group(brutal_kill, Config) ->
 init_per_group(_, Config) ->
     [{restart, temporary} || undefined == ?config(restart, Config)] ++
     [{shutdown, 500} || undefined == ?config(shutdown, Config)] ++
+    [{grace, 0} || undefined == ?config(grace, Config)] ++
     Config.
 
 end_per_group(_, _) ->
@@ -81,6 +85,8 @@ init_per_testcase(start_error, Config) ->
     Config;
 init_per_testcase(kill_children, Config) ->
     init_per_testcase(all, [{init, {ok, trap_exit}} | Config]);
+init_per_testcase(grace_children, Config) ->
+    init_per_testcase(all, [{grace, 500} | Config]);
 init_per_testcase(_TestCase, Config) ->
     Opts = [{active, false}, {packet, 4}],
     {ok, LSock} = gen_tcp:listen(0, Opts),
@@ -89,7 +95,8 @@ init_per_testcase(_TestCase, Config) ->
     Spec = #{id => acceptor_pool_test,
              start => {acceptor_pool_test, Init, []},
              restart => ?config(restart, Config),
-             shutdown => ?config(shutdown, Config)},
+             shutdown => ?config(shutdown, Config),
+             grace => ?config(grace, Config)},
     {ok, Pool} = acceptor_pool_test:start_link(Spec),
     {ok, Ref} = acceptor_pool:accept_socket(Pool, LSock, 1),
     Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
@@ -364,6 +371,53 @@ kill_children(Config) ->
     end,
     receive {'DOWN', Ref1, _, _, killed} -> ok end,
     receive {'DOWN', Ref2, _, _, killed} -> ok end,
+
+    receive {'EXIT', Pool, shutdown} -> ok end,
+
+    ok.
+
+grace_children(Config) ->
+    Connect = ?config(connect, Config),
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    Pool = ?config(pool, Config),
+    [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
+
+    {links, Links} = process_info(Pool, links),
+    [Acceptor] = Links -- [Pid1, Pid2, self()],
+
+    Ref1 = monitor(process, Pid1),
+    Ref2 = monitor(process, Pid2),
+    ARef = monitor(process, Acceptor),
+
+    _ = process_flag(trap_exit, true),
+    exit(Pool, shutdown),
+
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    {ok, ClientC} = Connect(),
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+
+    Reason = case ?config(shutdown, Config) of
+                 brutal_kill -> killed;
+                 _           -> shutdown
+             end,
+
+    receive {'DOWN', Ref1, _, _, Reason} -> ok end,
+    receive {'DOWN', Ref2, _, _, Reason} -> ok end,
+    receive {'DOWN', ARef, _, _, Reason} -> ok end,
 
     receive {'EXIT', Pool, shutdown} -> ok end,
 
