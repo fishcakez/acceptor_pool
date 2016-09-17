@@ -49,7 +49,7 @@ init_per_testcase(_TestCase, Config) ->
     {ok, LSock} = gen_tcp:listen(0, Opts),
     {ok, Port} = inet:port(LSock),
     {ok, Pool} = acceptor_pool_test:start_link([{accept_timeout, ?TIMEOUT}]),
-    {ok, Ref} = acceptor_pool:attach_socket(Pool, LSock, 1),
+    {ok, Ref} = acceptor_pool:accept_socket(Pool, LSock, 1),
     Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
     [{connect, Connect}, {pool, Pool}, {ref, Ref}, {socket, LSock} | Config].
 

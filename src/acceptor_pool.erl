@@ -6,7 +6,7 @@
 
 -export([start_link/2,
          start_link/3,
-         attach_socket/3,
+         accept_socket/3,
          which_sockets/1]).
 
 %% supervisor api
@@ -80,15 +80,15 @@ start_link(Module, Args) ->
 start_link(Name, Module, Args) ->
     gen_server:start_link(Name, ?MODULE, {Name, Module, Args}, []).
 
--spec attach_socket(Pool, Sock, Acceptors) -> {ok, Ref} | {error, Reason} when
+-spec accept_socket(Pool, Sock, Acceptors) -> {ok, Ref} | {error, Reason} when
       Pool :: pool(),
       Sock :: gen_tcp:socket(),
       Acceptors :: pos_integer(),
       Ref :: reference(),
       Reason :: inet:posix().
-attach_socket(Pool, Sock, Acceptors)
+accept_socket(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
-    gen_server:call(Pool, {attach_socket, Sock, Acceptors}, infinity).
+    gen_server:call(Pool, {accept_socket, Sock, Acceptors}, infinity).
 
 -spec which_sockets(Pool) -> [{SockModule, SockName, Sock, Ref}] when
       Pool :: pool(),
@@ -129,7 +129,7 @@ init({Name, Mod, Args}) ->
             init(Name, Mod, Args, Res)
     end.
 
-handle_call({attach_socket, Sock, NumAcceptors}, _, State) ->
+handle_call({accept_socket, Sock, NumAcceptors}, _, State) ->
     SockRef = monitor(port, Sock),
     case socket_info(Sock) of
         {ok, SockInfo} ->

@@ -5,7 +5,7 @@
 %% public api
 
 -export([start_link/0]).
--export([attach_socket/2]).
+-export([accept_socket/2]).
 
 %% acceptor_pool api
 
@@ -16,8 +16,8 @@
 start_link() ->
     acceptor_pool:start_link({local, ?MODULE}, ?MODULE, []).
 
-attach_socket(Socket, Acceptors) ->
-    acceptor_pool:attach_socket(?MODULE, Socket, Acceptors).
+accept_socket(Socket, Acceptors) ->
+    acceptor_pool:accept_socket(?MODULE, Socket, Acceptors).
 
 %% acceptor_pool api
 
