@@ -17,6 +17,9 @@ start_link(Spec) ->
 init(Spec) ->
     {ok, {#{}, [Spec]}}.
 
+acceptor_init(_, _, {ok, trap_exit}) ->
+    _ = process_flag(trap_exit, true),
+    {ok, trap};
 acceptor_init(_, _, Return) ->
     Return.
 

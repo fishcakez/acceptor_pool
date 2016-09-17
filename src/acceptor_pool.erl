@@ -33,6 +33,7 @@
 -type acceptor_spec() :: #{id := term(),
                            start := {module(), any(), [acceptor:option()]},
                            restart => permanent | transient | temporary,
+                           shutdown => timeout() | brutal_kill,
                            type => worker | supervisor,
                            modules => [module()] | dynamic}.
 
@@ -50,6 +51,7 @@
                 id :: term(),
                 start :: {module(), any(), [acceptor:option()]},
                 restart :: permanent | transient | temporary,
+                shutdown :: timeout() | brutal_kill,
                 type :: worker | supervisor,
                 modules :: [module()] | dynamic,
                 intensity :: non_neg_integer(),
@@ -204,21 +206,21 @@ format_status(terminate, [_, State]) ->
 format_status(_, [_, #state{mod=Mod} = State]) ->
     [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
 
-terminate(_, #state{conns=Conns, acceptors=Acceptors}) ->
-    _ = [exit(Conn, shutdown) || {Conn, _} <- maps:to_list(Conns)],
-    _ = [exit(Acceptor, shutdown) || {Acceptor, _} <- maps:to_list(Acceptors)],
-    terminate(maps:merge(Conns, Acceptors)).
+terminate(_, #state{conns=Conns, acceptors=Acceptors, shutdown=brutal_kill}) ->
+    Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
+    MRefs = monitor_and_exit(kill, Pids),
+    await_down(make_ref(), MRefs);
+terminate(_, #state{conns=Conns, acceptors=Acceptors, shutdown=Shutdown}) ->
+    Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
+    MRefs = monitor_and_exit(shutdown, Pids),
+    case Shutdown of
+        infinity -> await_down(make_ref(), MRefs);
+        Timeout  -> await_down(erlang:start_timer(Timeout, self(), kill), MRefs)
+    end.
 
 %% internal
 
-terminate(Conns) when map_size(Conns) > 0 ->
-    % TODO: send supervisor_report for abnormal exit
-    Conn = receive {'EXIT', Pid, _} -> Pid end,
-    terminate(maps:take(Conn, Conns));
-terminate(_) ->
-    ok.
-
-%% TODO: Support shutdown, restart and grace acceptor specs
+%% TODO: Support grace acceptor spec
 init(Name, Mod, Args,
      {ok,
       {#{} = Flags, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}}) ->
@@ -227,15 +229,19 @@ init(Name, Mod, Args,
     Period = maps:get(period, Flags, 5),
     Restart = maps:get(restart, Spec, temporary),
     Type = maps:get(type, Spec, worker),
+    Shutdown = maps:get(shutdown, Spec, shutdown_default(Type)),
     Modules = maps:get(modules, Spec, [AMod]),
     State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start,
-                   restart=Restart, type=Type, modules=Modules,
-                   intensity=Intensity, period=Period},
+                   restart=Restart, shutdown=Shutdown, type=Type,
+                   modules=Modules, intensity=Intensity, period=Period},
     {ok, State};
 init(_, _, _, ignore) ->
     ignore;
 init(_, Mod, _, Other) ->
     {stop, {bad_return, {Mod, init, Other}}}.
+
+shutdown_default(worker)     -> 5000;
+shutdown_default(supervisor) -> infinity.
 
 count(#state{conns=Conns, acceptors=Acceptors, type=Type}) ->
     Active = maps:size(Conns),
@@ -344,3 +350,24 @@ drop_restarts(Stale, Restarts) ->
         Time when Time >= Stale -> Restarts;
         Time when Time < Stale  -> drop_restarts(Stale, queue:drop(Restarts))
     end.
+
+monitor_and_exit(Reason, Pids) ->
+    maps:from_list([do_monitor_and_exit(Pid, Reason) || Pid <- Pids]).
+
+do_monitor_and_exit(Pid, Reason) ->
+    MRef = monitor(process, Pid),
+    exit(Pid, Reason),
+    {MRef, Pid}.
+
+await_down(Timer, MRefs) when map_size(MRefs) > 0 ->
+    receive
+        {'DOWN', MRef, _, _, _} -> await_down(Timer, maps:remove(MRef, MRefs));
+        {timeout, Timer, kill}  -> await_down(Timer, kill(MRefs));
+        _                       -> await_down(Timer, MRefs)
+    end;
+await_down(_, _) ->
+    ok.
+
+kill(MRefs) ->
+    _ = [exit(Pid, kill) || Pid <- maps:values(MRefs)],
+    MRefs.
