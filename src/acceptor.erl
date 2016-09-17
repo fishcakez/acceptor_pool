@@ -85,17 +85,18 @@ init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
       Reason :: timeout | closed | system_limit | inet:posix(),
       Parent :: pid(),
       Data :: data().
-acceptor_continue({ok, Sock}, Parent, Data) ->
-    #{module := Mod, state := State, ack := AckRef} = Data,
-    {ok, PeerName} = inet:peername(Sock),
-    _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
-    case init_socket(Sock, Data) of
-        ok              -> Mod:acceptor_continue(PeerName, Sock, State);
-        {error, Reason} -> failure(Reason, Data)
+acceptor_continue({ok, Sock}, Parent, #{socket := LSock} = Data) ->
+    % As done by prim_inet:accept/2
+    OptNames = [active, nodelay, keepalive, delay_send, priority, tos],
+    case inet:getopts(LSock, OptNames) of
+        {ok, Opts} ->
+            success(Sock, Opts, Parent, Data);
+        {error, Reason} ->
+            gen_tcp:close(Sock),
+            failure(Reason, Parent, Data)
     end;
-acceptor_continue({error, Reason}, Parent, #{ack := ARef} = Data) ->
-    _ = Parent ! {'CANCEL', self(), ARef},
-    failure(Reason, Data).
+acceptor_continue({error, Reason}, Parent, Data) ->
+    failure(Reason, Parent, Data).
 
 -spec acceptor_terminate(Reason, Parent, Data) -> no_return() when
       Reason :: term(),
@@ -119,26 +120,39 @@ handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef) ->
              socket => LSock, ack => AckRef},
     % Use another module to accept so can reload this module.
     acceptor_loop:accept(LSock, Timeout, Parent, ?MODULE, Data);
+handle_init(ignore, _, _, _, Parent, AckRef) ->
+    _ = Parent ! {'CANCEL', self(), AckRef},
+    exit(normal);
 handle_init(Other, _, _, _, _, _) ->
     handle_init(Other).
 
-handle_init(ignore) ->
-    exit(normal);
 handle_init({error, Reason}) ->
     exit(Reason);
 handle_init(Other) ->
     exit({bad_return_value, Other}).
 
-init_socket(Sock, #{socket_module := SockMod, socket := LSock}) ->
-	inet_db:register_socket(Sock, SockMod),
-    % As done by prim_inet:accept/2
-    OptNames = [active, nodelay, keepalive, delay_send, priority, tos],
-    case inet:getopts(LSock, OptNames) of
-        {ok, Opts}         -> inet:setopts(Sock, Opts);
-        {error, _} = Error -> Error
+success(Sock, Opts, Parent, Data) ->
+    #{ack := AckRef, socket_module := SockMod, module := Mod,
+      state := State} = Data,
+    {ok, PeerName} = inet:peername(Sock),
+    _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
+    _ = inet_db:register_socket(Sock, SockMod),
+    case inet:setopts(Sock, Opts) of
+        ok ->
+            Mod:acceptor_continue(PeerName, Sock, State);
+        {error, Reason} ->
+            gen_tcp:close(Sock),
+            terminate(Reason, Data)
     end.
 
--spec failure(any(), data()) -> no_return().
+-spec failure(timeout | closed | system_limit | inet:posix(), pid(), data()) ->
+    no_return().
+failure(Reason, Parent, #{ack := AckRef} = Data) ->
+    _ = Parent ! {'CANCEL', self(), AckRef},
+    failure(Reason, Data).
+
+-spec failure(timeout | closed | system_limit | inet:posix(), data()) ->
+    no_return().
 failure(timeout, Data) ->
     terminate(normal, Data);
 failure(closed, Data) ->
@@ -146,8 +160,11 @@ failure(closed, Data) ->
 failure(einval, #{socket := LSock} = Data) ->
     % LSock could have closed
     case erlang:port_info(LSock, connected) of
-        {connected, _} -> terminate(einval, Data);
-        undefined      -> terminate(normal, Data)
+        {connected, _} ->
+            gen_tcp:close(LSock),
+            terminate(einval, Data);
+        undefined ->
+            terminate(normal, Data)
     end;
 failure(Reason, #{socket := LSock} = Data) ->
     gen_tcp:close(LSock),

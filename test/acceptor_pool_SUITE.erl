@@ -21,7 +21,8 @@
          which_sockets/1,
          which_children/1,
          count_children/1,
-         format_status/1]).
+         format_status/1,
+         start_error/1]).
 
 %% common_test api
 
@@ -30,7 +31,8 @@ all() ->
 
 groups() ->
     [{tcp, [parallel], [accept, close_socket, which_sockets]},
-     {supervisor, [parallel], [which_children, count_children, format_status]}].
+     {supervisor, [parallel],
+      [which_children, count_children, format_status, start_error]}].
 
 suite() ->
     [{timetrap, {seconds, 15}}].
@@ -44,11 +46,13 @@ end_per_suite(Config) ->
     _ = [application:stop(App) || App <- Started],
     ok.
 
+init_per_testcase(start_error, Config) ->
+    Config;
 init_per_testcase(_TestCase, Config) ->
     Opts = [{active, false}, {packet, 4}],
     {ok, LSock} = gen_tcp:listen(0, Opts),
     {ok, Port} = inet:port(LSock),
-    {ok, Pool} = acceptor_pool_test:start_link([{accept_timeout, ?TIMEOUT}]),
+    {ok, Pool} = acceptor_pool_test:start_link({ok, undefined}),
     {ok, Ref} = acceptor_pool:accept_socket(Pool, LSock, 1),
     Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
     [{connect, Connect}, {pool, Pool}, {ref, Ref}, {socket, LSock} | Config].
@@ -157,5 +161,16 @@ format_status(Config) ->
 
     {supervisor, [{"Callback", acceptor_pool_test}]} =
         lists:keyfind(supervisor, 1, Misc),
+
+    ok.
+
+start_error(_) ->
+    _ = process_flag(trap_exit, true),
+    {ok, Pool} = acceptor_pool_test:start_link({error, shutdown}),
+
+    {ok, LSock} = gen_tcp:listen(0, []),
+    {ok, _} = acceptor_pool:accept_socket(Pool, LSock, 1),
+
+    receive {'EXIT', Pool, shutdown} -> ok end,
 
     ok.

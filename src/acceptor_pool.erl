@@ -27,7 +27,8 @@
 -type pool() :: pid() | atom() | {atom(), node()} | {via, module(), any()} |
                 {global, any()}.
 
--type pool_flags() :: #{}.
+-type pool_flags() :: #{intensity => non_neg_integer(),
+                        period => pos_integer()}.
 
 -type acceptor_spec() :: #{id := term(),
                            start := {module(), any(), [acceptor:option()]},
@@ -49,13 +50,16 @@
                 start :: {module(), any(), [acceptor:option()]},
                 type :: worker | supervisor,
                 modules :: [module()] | dynamic,
+                intensity :: non_neg_integer(),
+                period :: pos_integer(),
+                restarts = queue:new() :: queue:queue(integer()),
                 sockets = #{} :: #{reference() =>
                                    {module(), name(), gen_tcp:socket()}},
                 acceptors = #{} :: #{pid() =>
                                      {reference(), name(), reference()}},
                 conns = #{} :: #{pid() => {name(), name(), reference()}}}).
 
--callback init(Args) -> {ok, PoolFlags, [AcceptorSpec, ...]} | ignore when
+-callback init(Args) -> {ok, {PoolFlags, [AcceptorSpec, ...]}} | ignore when
       Args :: any(),
       PoolFlags :: pool_flags(),
       AcceptorSpec :: acceptor_spec().
@@ -191,30 +195,31 @@ format_status(terminate, [_, State]) ->
 format_status(_, [_, #state{mod=Mod} = State]) ->
     [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
 
-terminate(_, #state{conns=Conns}) ->
+terminate(_, #state{conns=Conns, acceptors=Acceptors}) ->
     _ = [exit(Conn, shutdown) || {Conn, _} <- maps:to_list(Conns)],
-    terminate(Conns).
+    _ = [exit(Acceptor, shutdown) || {Acceptor, _} <- maps:to_list(Acceptors)],
+    terminate(maps:merge(Conns, Acceptors)).
 
 %% internal
 
-terminate(Conns) ->
+terminate(Conns) when map_size(Conns) > 0 ->
     % TODO: send supervisor_report for abnormal exit
-    % TODO: shutdown like a supervisor
     Conn = receive {'EXIT', Pid, _} -> Pid end,
-    case maps:remove(Conn, Conns) of
-        NConns when map_size(NConns) == 0 ->
-            ok;
-        NConns ->
-            terminate(NConns)
-    end.
+    terminate(maps:take(Conn, Conns));
+terminate(_) ->
+    ok.
 
-%% TODO: Handle pool flags and acceptor specs
+%% TODO: Support shutdown, restart and grace acceptor specs
 init(Name, Mod, Args,
-     {ok, {#{}, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}}) ->
+     {ok,
+      {#{} = Flags, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}}) ->
+    % Same defaults as supervisor
+    Intensity = maps:get(intensity, Flags, 1),
+    Period = maps:get(period, Flags, 5),
     Type = maps:get(type, Spec, worker),
     Modules = maps:get(modules, Spec, [AMod]),
     State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start, type=Type,
-                   modules=Modules},
+                   modules=Modules, intensity=Intensity, period=Period},
     {ok, State};
 init(_, _, _, ignore) ->
     ignore;
@@ -275,9 +280,42 @@ handle_exit(Pid, #state{conns=Conns} = State) ->
 
 acceptor_exit(Pid, #state{acceptors=Acceptors} = State) ->
     case maps:take(Pid, Acceptors) of
-        {{SockRef, _, _}, NAcceptors} ->
-            NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
-            {noreply, State#state{acceptors=NAcceptors2}};
+        {{SockRef, _, _}, NAcceptors} when SockRef =/= undefined ->
+            restart_acceptor(SockRef, NAcceptors, State);
+        {{undefined, _, _}, NAcceptors} ->
+            % Received 'CANCEL' due to accept timeout or error, or init/3
+            % returning ignore. Can not tell difference between and already
+            % started new acceptor. If accept error we are waiting for listen
+            % socket 'DOWN' to cancel accepting and don't want accept errors t
+            % bring down pool. The acceptor will close the listen socket
+            % instead, isolating the pool from a bad listen socket.
+            {noreply, State#state{acceptors=NAcceptors}};
         error ->
             {noreply, State}
+    end.
+
+restart_acceptor(SockRef, Acceptors, State) ->
+    case add_restart(State) of
+        {ok, NState} ->
+            NAcceptors = start_acceptor(SockRef, Acceptors, NState),
+            {noreply, NState#state{acceptors=NAcceptors}};
+        {stop, NState} ->
+            {stop, shutdown, NState#state{acceptors=Acceptors}}
+    end.
+
+add_restart(State) ->
+    #state{intensity=Intensity, period=Period, restarts=Restarts} = State,
+    Now = erlang:monotonic_time(1),
+    NRestarts = drop_restarts(Now - Period, queue:in(Now, Restarts)),
+    NState = State#state{restarts=NRestarts},
+    case queue:len(NRestarts) of
+        Len when Len =< Intensity -> {ok, NState};
+        Len when Len > Intensity  -> {stop, NState}
+    end.
+
+drop_restarts(Stale, Restarts) ->
+    % Just inserted Now and Now > Stale so get/1 and drop/1 always succeed
+    case queue:get(Restarts) of
+        Time when Time >= Stale -> Restarts;
+        Time when Time < Stale  -> drop_restarts(Stale, queue:drop(Restarts))
     end.

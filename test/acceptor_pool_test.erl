@@ -11,17 +11,16 @@
          acceptor_continue/3,
          acceptor_terminate/2]).
 
-start_link(Opts) ->
-    acceptor_pool:start_link(?MODULE, Opts).
+start_link(Arg) ->
+    acceptor_pool:start_link(?MODULE, Arg).
 
-init(Opts) ->
-    {ok, {#{}, [#{id => ?MODULE, start => {?MODULE, [], Opts}}]}}.
+init(Arg) ->
+    {ok, {#{}, [#{id => ?MODULE, start => {?MODULE, Arg, []}}]}}.
 
+acceptor_init(_, _, Return) ->
+    Return.
 
-acceptor_init(_, _, []) ->
-    {ok, undefined}.
-
-acceptor_continue(_, Socket, undefined) ->
+acceptor_continue(_, Socket, _) ->
     loop(Socket).
 
 acceptor_terminate(_, _) ->
