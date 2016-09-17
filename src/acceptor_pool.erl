@@ -110,7 +110,7 @@ which_children(Pool) ->
 
 -spec count_children(Pool) -> Counts when
       Pool :: pool(),
-      Counts :: [{spec, active | workers | supervisors, non_neg_integer()}].
+      Counts :: [{spec | active | workers | supervisors, non_neg_integer()}].
 count_children(Pool) ->
     gen_server:call(Pool, count_children, infinity).
 
