@@ -6,7 +6,8 @@
 
 -export([start_link/2,
          start_link/3,
-         attach/3]).
+         attach_socket/3,
+         which_sockets/1]).
 
 %% supervisor api
 
@@ -79,15 +80,24 @@ start_link(Module, Args) ->
 start_link(Name, Module, Args) ->
     gen_server:start_link(Name, ?MODULE, {Name, Module, Args}, []).
 
--spec attach(Pool, Sock, Acceptors) -> {ok, Ref} | {error, Reason} when
+-spec attach_socket(Pool, Sock, Acceptors) -> {ok, Ref} | {error, Reason} when
       Pool :: pool(),
       Sock :: gen_tcp:socket(),
       Acceptors :: pos_integer(),
       Ref :: reference(),
       Reason :: inet:posix().
-attach(Pool, Sock, Acceptors)
+attach_socket(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
-    gen_server:call(Pool, {attach, Sock, Acceptors}, infinity).
+    gen_server:call(Pool, {attach_socket, Sock, Acceptors}, infinity).
+
+-spec which_sockets(Pool) -> [{SockModule, SockName, Sock, Ref}] when
+      Pool :: pool(),
+      SockModule :: module(),
+      SockName :: name(),
+      Sock :: gen_tcp:socket(),
+      Ref :: reference().
+which_sockets(Pool) ->
+    gen_server:call(Pool, which_sockets, infinity).
 
 -spec which_children(Pool) -> [{Id, Child, Type, Modules}] when
       Pool :: pool(),
@@ -119,7 +129,7 @@ init({Name, Mod, Args}) ->
             init(Name, Mod, Args, Res)
     end.
 
-handle_call({attach, Sock, NumAcceptors}, _, State) ->
+handle_call({attach_socket, Sock, NumAcceptors}, _, State) ->
     SockRef = monitor(port, Sock),
     case socket_info(Sock) of
         {ok, SockInfo} ->
@@ -129,6 +139,10 @@ handle_call({attach, Sock, NumAcceptors}, _, State) ->
             demonitor(SockRef, [flush]),
             {reply, Error, State}
     end;
+handle_call(which_sockets, _, #state{sockets=Sockets} = State) ->
+    Reply = [{SockMod, SockName, Sock, SockRef} ||
+             {SockRef, {SockMod, SockName, Sock}} <- maps:to_list(Sockets)],
+    {reply, Reply, State};
 handle_call(which_children, _, State) ->
     #state{conns=Conns, id=Id, type=Type, modules=Modules} = State,
     Children = [{{Id, PeerName, SockName, Ref}, Pid, Type, Modules} ||
@@ -232,7 +246,7 @@ socket_info(SockMod, Sock) ->
 start_acceptors(SockRef, SockInfo, NumAcceptors, State) ->
     #state{sockets=Sockets, acceptors=Acceptors} = State,
     NState = State#state{sockets=Sockets#{SockRef => SockInfo}},
-    NAcceptors= start_loop(SockRef, NumAcceptors, Acceptors, NState),
+    NAcceptors = start_loop(SockRef, NumAcceptors, Acceptors, NState),
     NState#state{acceptors=NAcceptors}.
 
 start_loop(_, 0, Acceptors, _) ->

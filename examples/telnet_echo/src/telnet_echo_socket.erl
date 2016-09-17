@@ -35,7 +35,7 @@ init([]) ->
                                   [NPort]),
             % acceptor could close the socket if there is a problem
             MRef = monitor(port, Socket),
-            telnet_echo_pool:attach(Socket, 1),
+            telnet_echo_pool:attach_socket(Socket, 1),
             {ok, {Socket, MRef}};
         {error, Reason} ->
             {stop, Reason}

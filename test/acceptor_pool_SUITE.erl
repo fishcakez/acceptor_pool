@@ -17,7 +17,8 @@
 %% test cases
 
 -export([accept/1,
-         close_listener/1,
+         close_socket/1,
+         which_sockets/1,
          which_children/1,
          count_children/1,
          format_status/1]).
@@ -28,7 +29,7 @@ all() ->
     [{group, tcp}, {group, supervisor}].
 
 groups() ->
-    [{tcp, [parallel], [accept, close_listener]},
+    [{tcp, [parallel], [accept, close_socket, which_sockets]},
      {supervisor, [parallel], [which_children, count_children, format_status]}].
 
 suite() ->
@@ -48,9 +49,9 @@ init_per_testcase(_TestCase, Config) ->
     {ok, LSock} = gen_tcp:listen(0, Opts),
     {ok, Port} = inet:port(LSock),
     {ok, Pool} = acceptor_pool_test:start_link([{accept_timeout, ?TIMEOUT}]),
-    {ok, Ref} = acceptor_pool:attach(Pool, LSock, 1),
+    {ok, Ref} = acceptor_pool:attach_socket(Pool, LSock, 1),
     Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
-    [{connect, Connect}, {pool, Pool}, {ref, Ref}, {listener, LSock} | Config].
+    [{connect, Connect}, {pool, Pool}, {ref, Ref}, {socket, LSock} | Config].
 
 end_per_testcase(_TestCase, _Config) ->
     ok.
@@ -67,11 +68,11 @@ accept(Config) ->
 
     ok.
 
-close_listener(Config) ->
+close_socket(Config) ->
     Connect = ?config(connect, Config),
     {ok, ClientA} = Connect(),
 
-    LSock = ?config(listener, Config),
+    LSock = ?config(socket, Config),
     ok = gen_tcp:close(LSock),
 
     {error, _} = Connect(),
@@ -79,6 +80,16 @@ close_listener(Config) ->
     ok = gen_tcp:send(ClientA, "hello"),
     {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
     ok = gen_tcp:close(ClientA),
+
+    ok.
+
+which_sockets(Config) ->
+    LSock = ?config(socket, Config),
+    {ok, Port} = inet:port(LSock),
+    Ref = ?config(ref, Config),
+    Pool = ?config(pool, Config),
+
+    [{inet_tcp, {_, Port}, LSock, Ref}] = acceptor_pool:which_sockets(Pool),
 
     ok.
 
