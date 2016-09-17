@@ -300,6 +300,7 @@ handle_exit(Pid, Reason, #state{conns=Conns} = State) ->
             acceptor_exit(Pid, Reason, State)
     end.
 
+% TODO: Send supervisor_reports like a supervisor
 child_exit(_, #state{restart=temporary} = State) ->
     {noreply, State};
 child_exit(normal, #state{restart=transient} = State) ->
