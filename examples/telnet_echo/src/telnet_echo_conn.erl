@@ -59,7 +59,7 @@ handle_info({tcp_closed, Socket}, {Socket, _} = State) ->
 handle_info({'DOWN', MRef, port, _, _}, {Socket, MRef} = State) ->
     %% Listen socket closed, receive all pending data then stop. In more
     %% advanced protocols will likely be able to do better.
-    error_logger:info_msg("Gracefully closing ~p", [Socket]),
+    error_logger:info_msg("Gracefully closing ~p~n", [Socket]),
     {stop, flush_socket(Socket), State};
 handle_info(_, State) ->
     {noreply, State}.
