@@ -11,6 +11,8 @@
          suite/0,
          init_per_suite/1,
          end_per_suite/1,
+         init_per_group/2,
+         end_per_group/2,
          init_per_testcase/2,
          end_per_testcase/2]).
 
@@ -22,17 +24,26 @@
          which_children/1,
          count_children/1,
          format_status/1,
-         start_error/1]).
+         start_error/1,
+         child_error/1,
+         permanent_shutdown/1,
+         transient_shutdown/1]).
 
 %% common_test api
 
 all() ->
-    [{group, tcp}, {group, supervisor}].
+    [{group, tcp},
+     {group, supervisor},
+     {group, permanent},
+     {group, transient},
+     {group, temporary}].
 
 groups() ->
     [{tcp, [parallel], [accept, close_socket, which_sockets]},
-     {supervisor, [parallel],
-      [which_children, count_children, format_status, start_error]}].
+     {supervisor, [parallel], [which_children, count_children, format_status]},
+     {permanent, [start_error, child_error, permanent_shutdown]},
+     {transient, [start_error, child_error, transient_shutdown]},
+     {temporary, [start_error]}].
 
 suite() ->
     [{timetrap, {seconds, 15}}].
@@ -46,13 +57,24 @@ end_per_suite(Config) ->
     _ = [application:stop(App) || App <- Started],
     ok.
 
-init_per_testcase(start_error, Config) ->
-    Config;
+init_per_group(permanent, Config) ->
+    [{restart, permanent} | Config];
+init_per_group(transient, Config) ->
+    [{restart, transient} | Config];
+init_per_group(_, Config) ->
+    [{restart, temporary} | Config].
+
+end_per_group(_, _) ->
+    ok.
+
 init_per_testcase(_TestCase, Config) ->
     Opts = [{active, false}, {packet, 4}],
     {ok, LSock} = gen_tcp:listen(0, Opts),
     {ok, Port} = inet:port(LSock),
-    {ok, Pool} = acceptor_pool_test:start_link({ok, undefined}),
+    Spec = #{id => acceptor_pool_test,
+             start => {acceptor_pool_test, {ok, undefined}, []},
+             restart => ?config(restart, Config)},
+    {ok, Pool} = acceptor_pool_test:start_link(Spec),
     {ok, Ref} = acceptor_pool:accept_socket(Pool, LSock, 1),
     Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
     [{connect, Connect}, {pool, Pool}, {ref, Ref}, {socket, LSock} | Config].
@@ -64,11 +86,21 @@ end_per_testcase(_TestCase, _Config) ->
 
 accept(Config) ->
     Connect = ?config(connect, Config),
-    {ok, ClientA} = Connect(),
 
+    {ok, ClientA} = Connect(),
     ok = gen_tcp:send(ClientA, "hello"),
     {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
     ok = gen_tcp:close(ClientA),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+    ok = gen_tcp:close(ClientB),
+
+    {ok, ClientC} = Connect(),
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+    ok = gen_tcp:close(ClientC),
 
     ok.
 
@@ -167,13 +199,83 @@ format_status(Config) ->
 
     ok.
 
-start_error(_) ->
+start_error(Config) ->
     _ = process_flag(trap_exit, true),
-    {ok, Pool} = acceptor_pool_test:start_link({error, shutdown}),
+    Spec = #{id => acceptor_pool_test,
+             start => {acceptor_pool_test, {error, shutdown}, []},
+             restart => ?config(restart, Config)},
+    {ok, Pool} = acceptor_pool_test:start_link(Spec),
 
     {ok, LSock} = gen_tcp:listen(0, []),
     {ok, _} = acceptor_pool:accept_socket(Pool, LSock, 1),
 
     receive {'EXIT', Pool, shutdown} -> ok end,
+
+    ok.
+
+child_error(Config) ->
+    _ = process_flag(trap_exit, true),
+    Pool = ?config(pool, Config),
+    Connect = ?config(connect, Config),
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
+
+    exit(Pid1, oops),
+    exit(Pid2, oops),
+
+    receive {'EXIT', Pool, shutdown} -> ok end,
+
+    ok.
+
+permanent_shutdown(Config) ->
+    _ = process_flag(trap_exit, true),
+    Pool = ?config(pool, Config),
+    Connect = ?config(connect, Config),
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
+
+    exit(Pid1, shutdown),
+    exit(Pid2, {shutdown, oops}),
+
+    receive {'EXIT', Pool, shutdown} -> ok end,
+
+    ok.
+
+transient_shutdown(Config) ->
+    Pool = ?config(pool, Config),
+    Connect = ?config(connect, Config),
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
+
+    exit(Pid1, shutdown),
+    exit(Pid2, {shutdown, oops}),
+
+    {ok, ClientC} = Connect(),
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
 
     ok.

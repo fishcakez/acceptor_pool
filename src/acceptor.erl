@@ -40,7 +40,8 @@
       State :: term().
 
 -callback acceptor_terminate(Reason, State) -> any() when
-      Reason :: normal | system_limit | inet:posix() | term(),
+      Reason :: {shutdown, timeout | closed | system_limit | inet:posix()} |
+                term(),
       State :: term().
 
 %% public api
@@ -121,7 +122,7 @@ handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef) ->
     % Use another module to accept so can reload this module.
     acceptor_loop:accept(LSock, Timeout, Parent, ?MODULE, Data);
 handle_init(ignore, _, _, _, Parent, AckRef) ->
-    _ = Parent ! {'CANCEL', self(), AckRef},
+    _ = Parent ! {'IGNORE', self(), AckRef},
     exit(normal);
 handle_init(Other, _, _, _, _, _) ->
     handle_init(Other).
@@ -136,14 +137,9 @@ success(Sock, Opts, Parent, Data) ->
       state := State} = Data,
     {ok, PeerName} = inet:peername(Sock),
     _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
-    _ = inet_db:register_socket(Sock, SockMod),
-    case inet:setopts(Sock, Opts) of
-        ok ->
-            Mod:acceptor_continue(PeerName, Sock, State);
-        {error, Reason} ->
-            gen_tcp:close(Sock),
-            terminate(Reason, Data)
-    end.
+    true = inet_db:register_socket(Sock, SockMod),
+    ok = inet:setopts(Sock, Opts),
+    Mod:acceptor_continue(PeerName, Sock, State).
 
 -spec failure(timeout | closed | system_limit | inet:posix(), pid(), data()) ->
     no_return().
@@ -154,21 +150,13 @@ failure(Reason, Parent, #{ack := AckRef} = Data) ->
 -spec failure(timeout | closed | system_limit | inet:posix(), data()) ->
     no_return().
 failure(timeout, Data) ->
-    terminate(normal, Data);
-failure(closed, Data) ->
-    terminate(normal, Data);
-failure(einval, #{socket := LSock} = Data) ->
-    % LSock could have closed
-    case erlang:port_info(LSock, connected) of
-        {connected, _} ->
-            gen_tcp:close(LSock),
-            terminate(einval, Data);
-        undefined ->
-            terminate(normal, Data)
-    end;
+    terminate({shutdown, timeout}, Data);
 failure(Reason, #{socket := LSock} = Data) ->
-    gen_tcp:close(LSock),
-    terminate(Reason, Data).
+    Ref = monitor(port, LSock),
+    exit(LSock, Reason),
+    receive
+        {'DOWN', Ref, _, _, _} -> terminate({shutdown, Reason}, Data)
+    end.
 
 -spec terminate(any(), data()) -> no_return().
 terminate(Reason, #{module := Mod, state := State} = Data) ->

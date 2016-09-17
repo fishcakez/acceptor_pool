@@ -11,11 +11,11 @@
          acceptor_continue/3,
          acceptor_terminate/2]).
 
-start_link(Arg) ->
-    acceptor_pool:start_link(?MODULE, Arg).
+start_link(Spec) ->
+    acceptor_pool:start_link(?MODULE, Spec).
 
-init(Arg) ->
-    {ok, {#{}, [#{id => ?MODULE, start => {?MODULE, Arg, []}}]}}.
+init(Spec) ->
+    {ok, {#{}, [Spec]}}.
 
 acceptor_init(_, _, Return) ->
     Return.

@@ -32,6 +32,7 @@
 
 -type acceptor_spec() :: #{id := term(),
                            start := {module(), any(), [acceptor:option()]},
+                           restart => permanent | transient | temporary,
                            type => worker | supervisor,
                            modules => [module()] | dynamic}.
 
@@ -48,6 +49,7 @@
                 args :: any(),
                 id :: term(),
                 start :: {module(), any(), [acceptor:option()]},
+                restart :: permanent | transient | temporary,
                 type :: worker | supervisor,
                 modules :: [module()] | dynamic,
                 intensity :: non_neg_integer(),
@@ -158,8 +160,8 @@ handle_call(count_children, _, State) ->
 handle_cast(Req, State) ->
     {stop, {bad_cast, Req}, State}.
 
-handle_info({'EXIT', Conn, _}, State) ->
-    handle_exit(Conn, State);
+handle_info({'EXIT', Conn, Reason}, State) ->
+    handle_exit(Conn, Reason, State);
 handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
     #state{acceptors=Acceptors, conns=Conns} = State,
     case maps:take(Pid, Acceptors) of
@@ -170,14 +172,21 @@ handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
         error ->
             {noreply, State}
     end;
-handle_info({'CANCEL', Pid, AcceptRef}, State) ->
-    #state{acceptors=Acceptors} = State,
+handle_info({'CANCEL', Pid, AcceptRef}, #state{acceptors=Acceptors} = State) ->
     case Acceptors of
         #{Pid := {SockRef, SockName, AcceptRef}} ->
             NAcceptors = start_acceptor(SockRef, Acceptors, State),
             PidInfo = {undefined, SockName, AcceptRef},
             {noreply, State#state{acceptors=NAcceptors#{Pid := PidInfo}}};
         _ ->
+            {noreply, State}
+    end;
+handle_info({'IGNORE', Pid, AcceptRef}, #state{acceptors=Acceptors} = State) ->
+    case maps:take(Pid, Acceptors) of
+        {{SockRef, _, AcceptRef}, NAcceptors} ->
+            NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
+            {noreply, State#state{acceptors=NAcceptors2}};
+        error ->
             {noreply, State}
     end;
 handle_info({'DOWN', SockRef, port, _, _}, #state{sockets=Sockets} = State) ->
@@ -216,10 +225,12 @@ init(Name, Mod, Args,
     % Same defaults as supervisor
     Intensity = maps:get(intensity, Flags, 1),
     Period = maps:get(period, Flags, 5),
+    Restart = maps:get(restart, Spec, temporary),
     Type = maps:get(type, Spec, worker),
     Modules = maps:get(modules, Spec, [AMod]),
-    State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start, type=Type,
-                   modules=Modules, intensity=Intensity, period=Period},
+    State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start,
+                   restart=Restart, type=Type, modules=Modules,
+                   intensity=Intensity, period=Period},
     {ok, State};
 init(_, _, _, ignore) ->
     ignore;
@@ -270,26 +281,40 @@ start_acceptor(SockRef, Acceptors,
             Acceptors
     end.
 
-handle_exit(Pid, #state{conns=Conns} = State) ->
+handle_exit(Pid, Reason, #state{conns=Conns} = State) ->
     case maps:take(Pid, Conns) of
         {_, NConns} ->
-            {noreply, State#state{conns=NConns}};
+            child_exit(Reason, State#state{conns=NConns});
         error ->
-            acceptor_exit(Pid, State)
+            acceptor_exit(Pid, Reason, State)
     end.
 
-acceptor_exit(Pid, #state{acceptors=Acceptors} = State) ->
+child_exit(_, #state{restart=temporary} = State) ->
+    {noreply, State};
+child_exit(normal, #state{restart=transient} = State) ->
+    {noreply, State};
+child_exit(shutdown, #state{restart=transient} = State) ->
+    {noreply, State};
+child_exit({shutdown, _}, #state{restart=transient} = State) ->
+    {noreply, State};
+child_exit(_, State) ->
+    case add_restart(State) of
+        {ok, NState}   -> {noreply, NState};
+        {stop, NState} -> {stop, shutdown, NState}
+    end.
+
+acceptor_exit(Pid, Reason, #state{acceptors=Acceptors} = State) ->
     case maps:take(Pid, Acceptors) of
         {{SockRef, _, _}, NAcceptors} when SockRef =/= undefined ->
             restart_acceptor(SockRef, NAcceptors, State);
         {{undefined, _, _}, NAcceptors} ->
-            % Received 'CANCEL' due to accept timeout or error, or init/3
-            % returning ignore. Can not tell difference between and already
-            % started new acceptor. If accept error we are waiting for listen
-            % socket 'DOWN' to cancel accepting and don't want accept errors t
-            % bring down pool. The acceptor will close the listen socket
-            % instead, isolating the pool from a bad listen socket.
-            {noreply, State#state{acceptors=NAcceptors}};
+            % Received 'CANCEL' due to accept timeout or error. If accept error
+            % we are waiting for listen socket 'DOWN' to cancel accepting and
+            % don't want accept errors to bring down pool. The acceptor will
+            % have sent exit signal to listen socket, hopefully isolating the
+            % pool from a bad listen socket. With permanent restart or
+            % acceptor_terminate/2 crash the max intensity can still be reached.
+            child_exit(Reason, State#state{acceptors=NAcceptors});
         error ->
             {noreply, State}
     end.
