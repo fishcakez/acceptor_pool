@@ -76,6 +76,9 @@ close_socket(Config) ->
     Connect = ?config(connect, Config),
     {ok, ClientA} = Connect(),
 
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
     LSock = ?config(socket, Config),
     ok = gen_tcp:close(LSock),
 
