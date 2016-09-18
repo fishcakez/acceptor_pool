@@ -128,7 +128,7 @@ count_children(Pool) ->
 
 %% @private
 init({self, Mod, Args}) ->
-    init({self(), Mod, Args});
+    init({{self(), Mod}, Mod, Args});
 init({Name, Mod, Args}) ->
     _ = process_flag(trap_exit, true),
     try Mod:init(Args) of
@@ -211,20 +211,15 @@ format_status(terminate, [_, State]) ->
 format_status(_, [_, #state{mod=Mod} = State]) ->
     [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
 
-terminate(_, #state{conns=Conns, acceptors=Acceptors, grace=Grace,
-                    shutdown=Shutdown}) ->
+terminate(_, State) ->
+    #state{conns=Conns, acceptors=Acceptors, grace=Grace, shutdown=Shutdown,
+           restart=Restart, name=Name, id=Id, start={AMod, _, _},
+           type=Type} = State,
     Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
     MRefs = maps:from_list([{monitor(process, Pid), Pid} || Pid <- Pids]),
-    case Grace of
-        infinity ->
-            await_down(make_ref(), MRefs);
-        _ when Shutdown /= brutal_kill ->
-            Timer = erlang:start_timer(Grace, self(), {shutdown, Shutdown}),
-            await_down(Timer, MRefs);
-        _ when Shutdown == brutal_kill ->
-            Timer = erlang:start_timer(Grace, self(), brutal_kill),
-            await_down(Timer, MRefs)
-    end.
+    Timer = grace_timer(Grace, Shutdown),
+    Reports = await_down(Timer, Restart, MRefs),
+    terminate_report(Name, Id, AMod, Restart, Shutdown, Type, Reports).
 
 %% internal
 
@@ -354,50 +349,74 @@ start_acceptor(SockRef, Acceptors,
 
 handle_exit(Pid, Reason, #state{conns=Conns} = State) ->
     case maps:take(Pid, Conns) of
-        {_, NConns} ->
-            child_exit(Reason, State#state{conns=NConns});
+        {SockInfo, NConns} ->
+            child_exit(Pid, Reason, SockInfo, State#state{conns=NConns});
         error ->
             acceptor_exit(Pid, Reason, State)
     end.
 
 % TODO: Send supervisor_reports like a supervisor
-child_exit(_, #state{restart=temporary} = State) ->
+child_exit(Pid, Reason, SockInfo, #state{restart=permanent} = State) ->
+    report(child_terminated, Pid, Reason, SockInfo, State),
+    add_restart(State);
+child_exit(_, normal, _, State) ->
     {noreply, State};
-child_exit(normal, #state{restart=transient} = State) ->
+child_exit(_, shutdown, _, State) ->
     {noreply, State};
-child_exit(shutdown, #state{restart=transient} = State) ->
+child_exit(_, {shutdown, _}, _, State) ->
     {noreply, State};
-child_exit({shutdown, _}, #state{restart=transient} = State) ->
+child_exit(Pid, Reason, SockInfo, #state{restart=temporary} = State) ->
+    report(child_terminated, Pid, Reason, SockInfo, State),
     {noreply, State};
-child_exit(_, State) ->
-    case add_restart(State) of
-        {ok, NState}   -> {noreply, NState};
-        {stop, NState} -> {stop, shutdown, NState}
-    end.
+child_exit(Pid, Reason, SockInfo, #state{restart=transient} = State) ->
+    report(child_terminated, Pid, Reason, SockInfo, State),
+    add_restart(State).
+
+report(Context, Pid, Reason, {PeerName, SockName, Ref}, State) ->
+    #state{name=Name, id=Id, start={AMod, _, _}, restart=Restart,
+           shutdown=Shutdown, type=Type} = State,
+    Report = [{supervisor, Name},
+              {errorContext, Context},
+              {reason, Reason},
+              {offender, [{pid, Pid},
+                          {id, {Id, PeerName, SockName, Ref}},
+                          {mfargs, {AMod, acceptor_init, undefined}},
+                          {restart_type, Restart},
+                          {shutdown, Shutdown},
+                          {child_type, Type}]}],
+    error_logger:error_report(supervisor_report, Report).
+
+report(Context, Reason, State) ->
+    SockInfo = {undefined, undefined, undefined},
+    report(Context, undefined, Reason, SockInfo, State).
 
 acceptor_exit(Pid, Reason, #state{acceptors=Acceptors} = State) ->
     case maps:take(Pid, Acceptors) of
-        {{SockRef, _, _}, NAcceptors} when SockRef =/= undefined ->
+        {{SockRef, SockName, AcceptRef}, NAcceptors}
+          when SockRef /= undefined ->
+            SockInfo = {undefined, SockName, AcceptRef},
+            report(start_error, Pid, Reason, SockInfo, State),
             restart_acceptor(SockRef, NAcceptors, State);
-        {{undefined, _, _}, NAcceptors} ->
+        {{undefined, _, _} = SockInfo, NAcceptors} ->
             % Received 'CANCEL' due to accept timeout or error. If accept error
             % we are waiting for listen socket 'DOWN' to cancel accepting and
             % don't want accept errors to bring down pool. The acceptor will
             % have sent exit signal to listen socket, hopefully isolating the
             % pool from a bad listen socket. With permanent restart or
             % acceptor_terminate/2 crash the max intensity can still be reached.
-            child_exit(Reason, State#state{acceptors=NAcceptors});
+            NState = State#state{acceptors=NAcceptors},
+            child_exit(Pid, Reason, SockInfo, NState);
         error ->
             {noreply, State}
     end.
 
 restart_acceptor(SockRef, Acceptors, State) ->
     case add_restart(State) of
-        {ok, NState} ->
+        {noreply, NState} ->
             NAcceptors = start_acceptor(SockRef, Acceptors, NState),
             {noreply, NState#state{acceptors=NAcceptors}};
-        {stop, NState} ->
-            {stop, shutdown, NState#state{acceptors=Acceptors}}
+        {stop, Reason,NState} ->
+            {stop, Reason, NState#state{acceptors=Acceptors}}
     end.
 
 add_restart(State) ->
@@ -406,8 +425,11 @@ add_restart(State) ->
     NRestarts = drop_restarts(Now - Period, queue:in(Now, Restarts)),
     NState = State#state{restarts=NRestarts},
     case queue:len(NRestarts) of
-        Len when Len =< Intensity -> {ok, NState};
-        Len when Len > Intensity  -> {stop, NState}
+        Len when Len =< Intensity ->
+            {noreply, NState};
+        Len when Len > Intensity ->
+            report(shutdown, reached_max_restart_intennsity, NState),
+            {stop, shutdown, NState}
     end.
 
 drop_restarts(Stale, Restarts) ->
@@ -430,26 +452,93 @@ change_init(Result, State) ->
             {error, Reason}
     end.
 
-await_down(Timer, MRefs) when map_size(MRefs) > 0 ->
+grace_timer(infinity, _) ->
+    make_ref();
+grace_timer(Grace, Shutdown) ->
+    erlang:start_timer(Grace, self(), {shutdown, Shutdown}).
+
+await_down(Timer, Restart, MRefs) ->
+    await_down(Timer, grace, Restart, dict:new(), #{}, MRefs).
+
+await_down(_, _, _, Reports, _, MRefs) when MRefs == #{} ->
+    Reports;
+await_down(Timer, Status, Restart, Reports, Exits, MRefs) ->
     receive
-        {'DOWN', MRef, _, _, _} ->
-            await_down(Timer, maps:remove(MRef, MRefs));
-        {timeout, Timer, brutal_kill}  ->
-            exits(kill, MRefs),
-            await_down(Timer, MRefs);
-        {timeout, Timer, {shutdown, infinity}} ->
-            exits(shutdown, MRefs),
-            await_down(Timer, MRefs);
-        {timeout, Timer, {shutdown, Timeout}} ->
-            exits(shutdown, MRefs),
-            NTimer = erlang:start_timer(Timeout, self(), brutal_kill),
-            await_down(NTimer, MRefs);
+        {'EXIT', Pid, Reason} ->
+            NExits = Exits#{Pid => Reason},
+            await_down(Timer, Status, Restart, Reports, NExits, MRefs);
+        {'DOWN', MRef, process, _, Reason} ->
+            {NReports, NExits, NMRefs} =
+                down(MRef, Reason, Status, Restart, Reports, Exits, MRefs),
+            await_down(Timer, Status, Restart, NReports, NExits, NMRefs);
+        {timeout, Timer, Msg} ->
+            {NTimer, NStatus} = down_timeout(Msg, Status, MRefs),
+            await_down(NTimer, NStatus, Restart, Reports, Exits, MRefs);
         _ ->
-            await_down(Timer, MRefs)
-    end;
-await_down(_, _) ->
-    ok.
+            await_down(Timer, Status, Restart, Reports, Exits, MRefs)
+    end.
+
+down_timeout({shutdown, infinity}, grace, MRefs) ->
+    exits(shutdown, MRefs),
+    {make_ref(), shutdown};
+down_timeout({shutdown, brutal_kill}, grace, MRefs) ->
+    exits(kill, MRefs),
+    {make_ref(), brutal_kill};
+down_timeout({shutdown, Shutdown}, grace, MRefs) ->
+    exits(shutdown, MRefs),
+    {erlang:start_timer(Shutdown, self(), brutal_kill), shutdown};
+down_timeout(brutal_kill, shutdown, MRefs) ->
+    exits(kill, MRefs),
+    {make_ref(), shutdown}.
 
 exits(Reason, MRefs) ->
     _ = [exit(Pid, Reason) || Pid <- maps:values(MRefs)],
     ok.
+
+down(MRef, Reason, Status, Restart, Reports, Exits, MRefs) ->
+    case maps:take(MRef, MRefs) of
+        {Pid, NMRefs} ->
+            {NReason, NExits} = check_reason(Pid, Reason, Exits),
+            NReports = handle_down(NReason, Status, Restart, Reports),
+            {NReports, NExits, NMRefs};
+        _ ->
+            {Reports, Exits, MRefs}
+    end.
+
+check_reason(Pid, noproc, Exits) ->
+    case maps:take(Pid, Exits) of
+        {_, _} = Result -> Result;
+        error           -> {noproc, Exits}
+    end;
+check_reason(Pid, Reason, Exits) ->
+    {Reason, maps:remove(Pid, Exits)}.
+
+handle_down(Reason, Status, Restart, Reports) ->
+    case down_action(Reason, Status, Restart) of
+        ignore -> Reports;
+        report -> dict:update_counter(Reason, 1, Reports)
+    end.
+
+down_action(_, grace, permanent)      -> report;
+down_action(normal, _, _)             -> ignore;
+down_action(shutdown, _, _)           -> ignore;
+down_action({shutdown, _}, _, _)      -> ignore;
+down_action(killed, brutal_kill, _)   -> ignore;
+down_action(_, _, _)                  -> report.
+
+terminate_report(Name, Id, AMod, Restart, Shutdown, Type, Reports) ->
+    ReportAll = fun(Reason, Count, Acc) ->
+                        Offender = [{pid, Count},
+                                    {id, {Id, undefined, undefined, undefined}},
+                                    {mfargs, {AMod, acceptor_init, undefined}},
+                                    {restart_type, Restart},
+                                    {shutdown, Shutdown},
+                                    {child_type, Type}],
+                        Report = [{supervisor, Name},
+                                  {errorContext, shutdown_error},
+                                  {reason, Reason},
+                                  {offender, Offender}],
+                        error_logger:error_report(supervisor_report, Report),
+                        Acc
+                end,
+    dict:fold(ReportAll, ok, Reports).
