@@ -1,3 +1,56 @@
+%%-------------------------------------------------------------------
+%%
+%% Copyright (c) 2016, James Fish <james@fishcakez.com>
+%%
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License. You may obtain
+%% a copy of the License at
+%%
+%% http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied. See the License for the
+%% specific language governing permissions and limitations
+%% under the License.
+%%
+%%-------------------------------------------------------------------
+%% @doc This module provides a `gen_tcp' acceptor pool supervisor. An
+%% `acceptor_pool' must define the `acceptor_pool' behaviour callback, which is
+%% very similar to the `supervisor' behaviour except all children must be
+%% `acceptor' proccesses and only the map terms are supported.
+%% The only callback is `init/1':
+%% ```
+%%-callback init(Args) -> {ok, {PoolFlags, [AcceptorSpec, ...]}} | ignore when
+%%    Args :: any(),
+%%    PoolFlags :: pool_flags(),
+%%    AcceptorSpec :: acceptor_spec().
+%% '''
+%% The `pool_flags()' are the `intensity' and `period' pairs as in as
+%% `supervisor:sup_flags/0' and have the equivalent behaviour.
+%%
+%% There must be list of a single `acceptor_spec()', just as there can only be a
+%% single `supervisor:child_spec/0' when the `strategy' is `simple_one_for_one'.
+%% The map pairs are the same as `supervisor:child_spec/0' except that `start''s
+%% value is of form:
+%% ```
+%% {AcceptorMod :: module(), AcceptorArg :: term(), Opts :: [acceptor:option()]}
+%% '''
+%% `AcceptorMod' is an `acceptor' callback module that will be called with
+%% argument `AcceptorArg', and spawned with acceptor options `Opts'.
+%%
+%% There is an additional `grace' key, that has a `timeout()' value. This is
+%% the time in milliseconds that the acceptor pool will wait for children to
+%% exit before starting to shut them down when terminating. This allows
+%% connections to be gracefully closed.
+%%
+%% To start accepting connections using the `acceptor_pool' call
+%% `accept_socket/3'.
+%%
+%% @see supervisor
+%% @see acceptor
 -module(acceptor_pool).
 
 -behaviour(gen_server).
@@ -72,6 +125,10 @@
 
 %% public api
 
+%% @doc Start an `acceptor_pool' with callback module `Module' and argument
+%% `Args'.
+%%
+%% @see start_link/3
 -spec start_link(Module, Args) -> {ok, Pid} | ignore | {error, Reason} when
       Module :: module(),
       Args :: any(),
@@ -80,6 +137,13 @@
 start_link(Module, Args) ->
     gen_server:start_link(?MODULE, {self, Module, Args}, []).
 
+%% @doc Start an `acceptor_pool' with name `Name', callback module `Module' and
+%% argument `Args'.
+%%
+%% This function is equivalent to `supervisor:start_link/3' except starts an
+%% `acceptor_pool' instead of a `supervisor'.
+%%
+%% @see supervisor:start_link/3
 -spec start_link(Name, Module, Args) ->
     {ok, Pid} | ignore | {error, Reason} when
       Name :: {local, atom()} | {via, module, any()} | {global, any()},
@@ -90,6 +154,11 @@ start_link(Module, Args) ->
 start_link(Name, Module, Args) ->
     gen_server:start_link(Name, ?MODULE, {Name, Module, Args}, []).
 
+%% @doc Ask `acceptor_pool' `Pool' to accept on the listen socket `Sock' with
+%% `Acceptors' number of acceptors.
+%%
+%% Returns `{ok, Ref}' on success or `{error, Reason}' on failure. If acceptors
+%% fail to accept connections an exit signal is sent `Sock'.
 -spec accept_socket(Pool, Sock, Acceptors) -> {ok, Ref} | {error, Reason} when
       Pool :: pool(),
       Sock :: gen_tcp:socket(),
@@ -100,6 +169,7 @@ accept_socket(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
     gen_server:call(Pool, {accept_socket, Sock, Acceptors}, infinity).
 
+%% @doc List the listen sockets being used by the `acceptor_pool'.
 -spec which_sockets(Pool) -> [{SockModule, SockName, Sock, Ref}] when
       Pool :: pool(),
       SockModule :: module(),
@@ -109,15 +179,30 @@ accept_socket(Pool, Sock, Acceptors)
 which_sockets(Pool) ->
     gen_server:call(Pool, which_sockets, infinity).
 
+%% @doc List the children of the `acceptor_pool'.
+%%
+%% This function is equivalent to `supervisor:which_children/1' except that the
+%% peer name, listen socket name and a unique reference are combined with the
+%% `id' from `init/1'.
+%%
+%% Processes that are waiting for a socket are not included.
+%%
+%% @see supervisor:which_children/1.
 -spec which_children(Pool) -> [{Id, Child, Type, Modules}] when
       Pool :: pool(),
-      Id :: {term(), name(), name(), reference()},
+      Id ::
+        {term(), PeerName :: name(), SockName :: name(), Ref :: reference()},
       Child :: pid(),
       Type :: worker | supervisor,
       Modules :: [module()] | dynamic.
 which_children(Pool) ->
     gen_server:call(Pool, which_children, infinity).
 
+%% @doc Count the children of the `acceptor_pool'.
+%%
+%% Processes that are waiting for a socket are not included in `active'.
+%%
+%% @see supervisor:count_children/1.
 -spec count_children(Pool) -> Counts when
       Pool :: pool(),
       Counts :: [{spec | active | workers | supervisors, non_neg_integer()}].
@@ -139,6 +224,7 @@ init({Name, Mod, Args}) ->
             init(Name, Mod, Args, Res)
     end.
 
+%% @private
 handle_call({accept_socket, Sock, NumAcceptors}, _, State) ->
     SockRef = monitor(port, Sock),
     case socket_info(Sock) of
@@ -161,9 +247,11 @@ handle_call(which_children, _, State) ->
 handle_call(count_children, _, State) ->
     {reply, count(State), State}.
 
+%% @private
 handle_cast(Req, State) ->
     {stop, {bad_cast, Req}, State}.
 
+%% @private
 handle_info({'EXIT', Conn, Reason}, State) ->
     handle_exit(Conn, Reason, State);
 handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
@@ -199,6 +287,7 @@ handle_info(Msg, #state{name=Name} = State) ->
     error_logger:error_msg("~p received unexpected message: ~p~n", [Name, Msg]),
     {noreply, State}.
 
+%% @private
 code_change(_, #state{mod=Mod, args=Args} = State, _) ->
     try Mod:init(Args) of
         Result       -> change_init(Result, State)
@@ -206,11 +295,13 @@ code_change(_, #state{mod=Mod, args=Args} = State, _) ->
         throw:Result -> change_init(Result, State)
     end.
 
+%% @private
 format_status(terminate, [_, State]) ->
     State;
 format_status(_, [_, #state{mod=Mod} = State]) ->
     [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
 
+%% @private
 terminate(_, State) ->
     #state{conns=Conns, acceptors=Acceptors, grace=Grace, shutdown=Shutdown,
            restart=Restart, name=Name, id=Id, start={AMod, _, _},

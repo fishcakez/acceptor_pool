@@ -1,5 +1,94 @@
+%%-------------------------------------------------------------------
+%%
+%% Copyright (c) 2016, James Fish <james@fishcakez.com>
+%%
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License. You may obtain
+%% a copy of the License at
+%%
+%% http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied. See the License for the
+%% specific language governing permissions and limitations
+%% under the License.
+%%
+%%-------------------------------------------------------------------
+%% @doc This module provides a `gen_tcp' acceptor behaviour for use with
+%% `acceptor_pool'. There are three callbacks.
+%%
+%% Before accepting a socket `acceptor_init/3':
+%% ```
+%% -callback acceptor_init(SockName, LSock, Args) ->
+%%     {ok, State} | {ok, State, TimeoutOrHib} | ignore | {error, Reason} when
+%%       SockName :: acceptor_pool:name(),
+%%       LSock :: gen_tcp:socket(),
+%%       Args :: term(),
+%%       State :: term(),
+%%       TimeoutOrHib :: timeout() | hibernate,
+%%       Reason :: term().
+%% '''
+%% `SockName' is the `inet:sockname/1' of the listen socket, which may be
+%% `{{0,0,0,0}, Port}' if bound to all ip addresses. `LSock' is the listen
+%% socket and `Args' is the argument from the `acceptor_pool:acceptor_spec/0'
+%% in the `acceptor_pool'. This callback should do any setup required before
+%% trying to accept on the socket.
+%%
+%% To be able to gracefully close open connections it is recommended for an
+%% acceptor process to `monitor(port, LSock)' and gracefully close on receiving
+%% the DOWN messages. This can be combined with the listen socket being shut
+%% down before the `acceptor_pool' in the supervisor tree (e.g. after the
+%% `acceptor_pool' in a `rest_for_one' or `one_for_all') and the
+%% `acceptor_pool' defining the `grace' specification.
+%%
+%% To accept on the socket for `Timeout' timeout return
+%% `{ok, State, Timeout :: timeout()}' with `{ok, State}' and
+%% `{ok, State, hibernate}' being equivalent to `{ok, State, infinity}' wit the
+%% later also causing the process to hibernate before trying to accept a
+%% connection. `State' will be passed to either `acceptor_continue/3' or
+%% `acceptor_continue/2'.
+%%
+%% To ignore this process and try again with another process return `ignore', or
+%% if an error occurs `{error, term()}'. Start errors always count towards the
+%% restart intensity of the `acceptor_pool', even with a `restart' of
+%% `temporary' but `ignore' does not.
+%%
+%% Once a socket is accepted `acceptor_continue/3':
+%% ```
+%% -callback acceptor_continue(PeerName, Sock, State) -> no_return() when
+%%      PeerName :: acceptor_pool:name(),
+%%      Sock :: gen_tcp:socket(),
+%%      State :: term().
+%% '''
+%% `PeerName' the `inet:peername/1' of the accepted socket `Sock' and `State' is
+%% the state returned by `acceptor_init/3'. The callback module now has full
+%% control of the process and should enter its main loop, perhaps with
+%% `gen_statem:enter_loop/6'.
+%%
+%% It can be a long wait for a socket and so it possible for the `State' to have
+%% been created using an old version of the module. During the wait the process
+%% is hidden from the supervision tree and so hidden from the relup system.
+%% However it is possible to `load' both `acceptor' and the acceptor callback
+%% module during an appup with a soft post purge because neither module is on
+%% the call stack.
+%%
+%% If accepting a socket fails `acceptor_terminate/2':
+%% ```
+%% -callback acceptor_terminate(Reason, State) -> any() when
+%%      Reason :: {shutdown, timeout | closed | system_limit | inet:posix()} |
+%%                 term(),
+%%       State :: term().
+%% '''
+%% `Reason' is the reason for termination, and the exit reason of the process.
+%% If a socket error caused the termination the reason is
+%% `{shutdown, timeout | closed | system_limit | inet:posix()}'. Otherwise the
+%% reason is an exit signal from the `acceptor_pool'.
+%%
+%% `State' is the state returned by `acceptor_init/3'.
 -module(acceptor).
-
 -behaviour(acceptor_loop).
 
 %% public api
@@ -99,6 +188,7 @@ acceptor_continue({ok, Sock}, Parent, #{socket := LSock} = Data) ->
 acceptor_continue({error, Reason}, Parent, Data) ->
     failure(Reason, Parent, Data).
 
+%% @private
 -spec acceptor_terminate(Reason, Parent, Data) -> no_return() when
       Reason :: term(),
       Parent :: pid(),
