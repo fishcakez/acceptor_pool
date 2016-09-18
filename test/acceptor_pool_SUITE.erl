@@ -30,7 +30,10 @@
          transient_shutdown/1,
          shutdown_children/1,
          kill_children/1,
-         grace_children/1]).
+         grace_children/1,
+         change_spec/1,
+         change_ignore/1,
+         change_error/1]).
 
 %% common_test api
 
@@ -41,7 +44,8 @@ all() ->
      {group, transient},
      {group, temporary},
      {group, shutdown_timeout},
-     {group, brutal_kill}].
+     {group, brutal_kill},
+     {group, code_change}].
 
 groups() ->
     [{tcp, [parallel], [accept, close_socket, which_sockets]},
@@ -52,7 +56,8 @@ groups() ->
      {shutdown_timeout, [parallel],
       [shutdown_children, kill_children, grace_children]},
      {brutal_kill, [parallel],
-      [shutdown_children, kill_children, grace_children]}].
+      [shutdown_children, kill_children, grace_children]},
+     {code_change, [parallel], [change_spec, change_ignore, change_error]}].
 
 suite() ->
     [{timetrap, {seconds, 15}}].
@@ -82,6 +87,9 @@ end_per_group(_, _) ->
     ok.
 
 init_per_testcase(start_error, Config) ->
+    Config;
+init_per_testcase(Change, Config)
+  when Change == change_spec; Change == change_ignore; Change == change_error ->
     Config;
 init_per_testcase(kill_children, Config) ->
     init_per_testcase(all, [{init, {ok, trap_exit}} | Config]);
@@ -420,5 +428,191 @@ grace_children(Config) ->
     receive {'DOWN', ARef, _, _, Reason} -> ok end,
 
     receive {'EXIT', Pool, shutdown} -> ok end,
+
+    ok.
+
+change_spec(_) ->
+    Fun = fun() ->
+                  {ok, Spec} = application:get_env(acceptor_pool, change_spec),
+                  Spec
+          end,
+
+    Spec1 = #{id => acceptor_pool_test1,
+              start => {acceptor_pool_test, {ok, undefined}, []}},
+    ok = application:set_env(acceptor_pool, change_spec, Spec1),
+    {ok, Pool} = acceptor_pool_test:start_link(Fun),
+
+    Opts = [{active, false}, {packet, 4}],
+    {ok, LSock} = gen_tcp:listen(0, Opts),
+    {ok, _} = acceptor_pool:accept_socket(Pool, LSock, 1),
+    {ok, Port} = inet:port(LSock),
+    Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test1, _, _, _}, _, worker, [acceptor_pool_test]}] =
+        acceptor_pool:which_children(Pool),
+
+    Spec2 = #{id => acceptor_pool_test2,
+              start => {acceptor_pool_test, {ok, trap_exit}, []},
+              type => supervisor,
+              modules => dynamic},
+    ok = application:set_env(acceptor_pool, change_spec, Spec2),
+
+    ok = sys:suspend(Pool),
+    ok = sys:change_code(Pool, acceptor_pool_test, undefined, undefined),
+    ok = sys:resume(Pool),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test2, _, _, _}, Pid1, supervisor, dynamic},
+     {{acceptor_pool_test2, _, _, _}, Pid2, supervisor, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    {ok, ClientC} = Connect(),
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test2, _, _, _}, Pid3, supervisor, dynamic},
+     {{acceptor_pool_test2, _, _, _}, Pid4, supervisor, dynamic},
+     {{acceptor_pool_test2, _, _, _}, Pid5, supervisor, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    [PidC] = [Pid3, Pid4, Pid5] -- [Pid1, Pid2],
+
+    exit(Pid1, shutdown),
+    exit(Pid2, shutdown),
+    exit(PidC, shutdown),
+
+    {error, closed} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+    {error, closed} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+
+    ok.
+
+change_ignore(_) ->
+    Fun = fun() ->
+                  {ok, Spec} = application:get_env(acceptor_pool,
+                                                   change_ignore),
+                  Spec
+          end,
+
+    Spec1 = #{id => acceptor_pool_test,
+              start => {acceptor_pool_test, {ok, undefined}, []},
+              modules => dynamic},
+    ok = application:set_env(acceptor_pool, change_ignore, Spec1),
+    {ok, Pool} = acceptor_pool_test:start_link(Fun),
+
+    Opts = [{active, false}, {packet, 4}],
+    {ok, LSock} = gen_tcp:listen(0, Opts),
+    {ok, _} = acceptor_pool:accept_socket(Pool, LSock, 1),
+    {ok, Port} = inet:port(LSock),
+    Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, _, _, _}, _, worker, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    ok = application:set_env(acceptor_pool, change_ignore, ignore),
+
+    ok = sys:suspend(Pool),
+    ok = sys:change_code(Pool, acceptor_pool_test, undefined, undefined),
+    ok = sys:resume(Pool),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, _, _, _}, _, worker, dynamic},
+     {{acceptor_pool_test, _, _, _}, _, worker, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    {ok, ClientC} = Connect(),
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, _, _, _}, _, worker, dynamic},
+     {{acceptor_pool_test, _, _, _}, _, worker, dynamic},
+     {{acceptor_pool_test, _, _, _}, _, worker, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+
+    ok.
+
+change_error(_) ->
+    Fun = fun() ->
+                  {ok, Spec} = application:get_env(acceptor_pool,
+                                                   change_error),
+                  Spec
+          end,
+
+    Spec1 = #{id => acceptor_pool_test,
+              start => {acceptor_pool_test, {ok, undefined}, []},
+              modules => dynamic},
+    ok = application:set_env(acceptor_pool, change_error, Spec1),
+    {ok, Pool} = acceptor_pool_test:start_link(Fun),
+
+    Opts = [{active, false}, {packet, 4}],
+    {ok, LSock} = gen_tcp:listen(0, Opts),
+    {ok, _} = acceptor_pool:accept_socket(Pool, LSock, 1),
+    {ok, Port} = inet:port(LSock),
+    Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
+
+    {ok, ClientA} = Connect(),
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, _, _, _}, _, worker, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    ok = application:set_env(acceptor_pool, change_error, bad),
+
+    ok = sys:suspend(Pool),
+    {error, _} = sys:change_code(Pool, acceptor_pool_test, undefined,
+                                 undefined),
+    ok = sys:resume(Pool),
+
+    {ok, ClientB} = Connect(),
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, _, _, _}, _, worker, dynamic},
+     {{acceptor_pool_test, _, _, _}, _, worker, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    {ok, ClientC} = Connect(),
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
+
+    [{{acceptor_pool_test, _, _, _}, _, worker, dynamic},
+     {{acceptor_pool_test, _, _, _}, _, worker, dynamic},
+     {{acceptor_pool_test, _, _, _}, _, worker, dynamic}] =
+        acceptor_pool:which_children(Pool),
+
+    ok = gen_tcp:send(ClientA, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
+
+    ok = gen_tcp:send(ClientB, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
+
+    ok = gen_tcp:send(ClientC, "hello"),
+    {ok, "hello"} = gen_tcp:recv(ClientC, 0, ?TIMEOUT),
 
     ok.

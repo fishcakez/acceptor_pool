@@ -14,8 +14,12 @@
 start_link(Spec) ->
     acceptor_pool:start_link(?MODULE, Spec).
 
-init(Spec) ->
-    {ok, {#{}, [Spec]}}.
+init(Spec) when is_map(Spec) ->
+    {ok, {#{}, [Spec]}};
+init(ignore) ->
+    ignore;
+init(Fun) when is_function(Fun, 0) ->
+    init(Fun()).
 
 acceptor_init(_, _, {ok, trap_exit}) ->
     _ = process_flag(trap_exit, true),

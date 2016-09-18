@@ -199,9 +199,12 @@ handle_info(Msg, #state{name=Name} = State) ->
     error_logger:error_msg("~p received unexpected message: ~p~n", [Name, Msg]),
     {noreply, State}.
 
-code_change(_, State, _) ->
-    % TODO: Support supervisor style reconfiguration with code change
-    {ok, State}.
+code_change(_, #state{mod=Mod, args=Args} = State, _) ->
+    try Mod:init(Args) of
+        Result       -> change_init(Result, State)
+    catch
+        throw:Result -> change_init(Result, State)
+    end.
 
 format_status(terminate, [_, State]) ->
     State;
@@ -355,6 +358,19 @@ drop_restarts(Stale, Restarts) ->
     case queue:get(Restarts) of
         Time when Time >= Stale -> Restarts;
         Time when Time < Stale  -> drop_restarts(Stale, queue:drop(Restarts))
+    end.
+
+change_init(Result, State) ->
+    #state{name=Name, mod=Mod, args=Args, restarts=Restarts, sockets=Sockets,
+           acceptors=Acceptors, conns=Conns} = State,
+    case init(Name, Mod, Args, Result) of
+        {ok, NState} ->
+            {ok, NState#state{restarts=Restarts, sockets=Sockets,
+                              acceptors=Acceptors, conns=Conns}};
+        ignore ->
+            {ok, State};
+        {stop, Reason} ->
+            {error, Reason}
     end.
 
 await_down(Timer, MRefs) when map_size(MRefs) > 0 ->
