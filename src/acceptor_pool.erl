@@ -228,25 +228,82 @@ terminate(_, #state{conns=Conns, acceptors=Acceptors, grace=Grace,
 
 %% internal
 
-init(Name, Mod, Args,
-     {ok,
-      {#{} = Flags, [#{id := Id, start := {AMod, _, _} = Start} = Spec]}}) ->
-    % Same defaults as supervisor
-    Intensity = maps:get(intensity, Flags, 1),
-    Period = maps:get(period, Flags, 5),
-    Restart = maps:get(restart, Spec, temporary),
-    Type = maps:get(type, Spec, worker),
-    Shutdown = maps:get(shutdown, Spec, shutdown_default(Type)),
-    Grace = maps:get(grace, Spec, 0),
-    Modules = maps:get(modules, Spec, [AMod]),
-    State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start,
-                   restart=Restart, shutdown=Shutdown, grace=Grace, type=Type,
-                   modules=Modules, intensity=Intensity, period=Period},
-    {ok, State};
+init(Name, Mod, Args, {ok, {#{} = Flags, [#{} = Spec]}}) ->
+    case validate_config(Flags, Spec) of
+        ok ->
+            % Same defaults as supervisor
+            Intensity = maps:get(intensity, Flags, 1),
+            Period = maps:get(period, Flags, 5),
+            Id = maps:get(id, Spec),
+            {AMod, _, _} = Start = maps:get(start, Spec),
+            Restart = maps:get(restart, Spec, temporary),
+            Type = maps:get(type, Spec, worker),
+            Shutdown = maps:get(shutdown, Spec, shutdown_default(Type)),
+            Grace = maps:get(grace, Spec, 0),
+            Modules = maps:get(modules, Spec, [AMod]),
+            State = #state{name=Name, mod=Mod, args=Args, id=Id, start=Start,
+                           restart=Restart, shutdown=Shutdown, grace=Grace,
+                           type=Type, modules=Modules, intensity=Intensity,
+                           period=Period},
+            {ok, State};
+        {error, Reason} ->
+            {stop, Reason}
+    end;
 init(_, _, _, ignore) ->
     ignore;
 init(_, Mod, _, Other) ->
     {stop, {bad_return, {Mod, init, Other}}}.
+
+validate_config(Flags, Spec) ->
+    case validate_flags(Flags) of
+        ok                 -> validate_spec(Spec);
+        {error, _} = Error -> Error
+    end.
+
+validate_flags(Flags) ->
+    validate(fun validate_flag/2, Flags).
+
+validate(Validate, Map) ->
+    maps:fold(fun(Key, Value, ok)           -> Validate(Key, Value);
+                 (_, _, {error, _} = Error) -> Error
+              end, ok, Map).
+
+validate_flag(intensity, Intensity)
+  when is_integer(Intensity), Intensity >= 0 ->
+    ok;
+validate_flag(period, Period)
+  when is_integer(Period), Period > 0 ->
+    ok;
+validate_flag(Key, Value) ->
+    {error, {bad_flag, {Key, Value}}}.
+
+validate_spec(Spec) ->
+    case {maps:is_key(id, Spec), maps:is_key(start, Spec)} of
+        {true, true} -> validate(fun validate_spec/2, Spec);
+        {false, _}   -> {error, {missing_spec, id}};
+        {_, false}   -> {error, {missing_spec, start}}
+    end.
+
+validate_spec(id, _) ->
+    ok;
+validate_spec(start, {AMod, _, Opts}) when is_atom(AMod), is_list(Opts) ->
+    ok;
+validate_spec(restart, Restart)
+  when Restart == permanent; Restart == transient; Restart == temporary ->
+    ok;
+validate_spec(shutdown, Shutdown) when is_integer(Shutdown), Shutdown >= 0 ->
+    ok;
+validate_spec(shutdown, Shutdown)
+  when Shutdown == infinity; Shutdown == brutal_kill ->
+    ok;
+validate_spec(grace, Grace) when is_integer(Grace), Grace >= 0 ->
+    ok;
+validate_spec(type, Type) when Type == worker; Type == supervisor ->
+    ok;
+validate_spec(modules, Modules) when is_list(Modules); Modules == dynamic ->
+    ok;
+validate_spec(Key, Value) ->
+    {error, {bad_spec, {Key, Value}}}.
 
 shutdown_default(worker)     -> 5000;
 shutdown_default(supervisor) -> infinity.
