@@ -27,8 +27,8 @@ acceptor_continue(_PeerName, Socket, MRef) ->
     gen_server:enter_loop(?MODULE, [], {Socket, MRef}).
 
 acceptor_terminate(Reason, _) ->
-    % called when acceptor_pool terminating during accept and current process
-    % trapping exits (not trapping).
+    % Something when wrong. Either the acceptor_pool is terminating or the
+    % accept failed.
     exit(Reason).
 
 %% gen_server api

@@ -132,14 +132,26 @@ handle_init({error, Reason}) ->
 handle_init(Other) ->
     exit({bad_return_value, Other}).
 
-success(Sock, Opts, Parent, Data) ->
-    #{ack := AckRef, socket_module := SockMod, module := Mod,
-      state := State} = Data,
-    {ok, PeerName} = inet:peername(Sock),
-    _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
-    true = inet_db:register_socket(Sock, SockMod),
-    ok = inet:setopts(Sock, Opts),
-    Mod:acceptor_continue(PeerName, Sock, State).
+success(Sock, Opts, Parent, #{ack := AckRef} = Data) ->
+    case inet:peername(Sock) of
+        {ok, PeerName} ->
+            _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
+            continue(Sock, Opts, PeerName, Data);
+        {error, Reason} ->
+            gen_tcp:close(Sock),
+            failure(Reason, Data)
+    end.
+
+continue(Sock, Opts, PeerName, Data) ->
+    #{socket_module := SockMod, module := Mod, state := State} = Data,
+    _ = inet_db:register_socket(Sock, SockMod),
+    case inet:setopts(Sock, Opts) of
+        ok ->
+            Mod:acceptor_continue(PeerName, Sock, State);
+        {error, Reason} ->
+            gen_tcp:close(Sock),
+            failure(Reason, Data)
+    end.
 
 -spec failure(timeout | closed | system_limit | inet:posix(), pid(), data()) ->
     no_return().
