@@ -26,7 +26,6 @@
          format_status/1,
          start_error/1,
          child_error/1,
-         permanent_shutdown/1,
          transient_shutdown/1,
          shutdown_children/1,
          kill_children/1,
@@ -40,7 +39,6 @@
 all() ->
     [{group, tcp},
      {group, supervisor},
-     {group, permanent},
      {group, transient},
      {group, temporary},
      {group, shutdown_timeout},
@@ -50,7 +48,6 @@ all() ->
 groups() ->
     [{tcp, [parallel], [accept, close_socket, which_sockets]},
      {supervisor, [parallel], [which_children, count_children, format_status]},
-     {permanent, [start_error, child_error, permanent_shutdown]},
      {transient, [start_error, child_error, transient_shutdown]},
      {temporary, [start_error]},
      {shutdown_timeout, [parallel],
@@ -71,8 +68,6 @@ end_per_suite(Config) ->
     _ = [application:stop(App) || App <- Started],
     ok.
 
-init_per_group(permanent, Config) ->
-    [{restart, permanent} | init_per_group(all, Config)];
 init_per_group(transient, Config) ->
     [{restart, transient} | init_per_group(all, Config)];
 init_per_group(brutal_kill, Config) ->
@@ -261,28 +256,6 @@ child_error(Config) ->
 
     exit(Pid1, oops),
     exit(Pid2, oops),
-
-    receive {'EXIT', Pool, shutdown} -> ok end,
-
-    ok.
-
-permanent_shutdown(Config) ->
-    _ = process_flag(trap_exit, true),
-    Pool = ?config(pool, Config),
-    Connect = ?config(connect, Config),
-
-    {ok, ClientA} = Connect(),
-    ok = gen_tcp:send(ClientA, "hello"),
-    {ok, "hello"} = gen_tcp:recv(ClientA, 0, ?TIMEOUT),
-
-    {ok, ClientB} = Connect(),
-    ok = gen_tcp:send(ClientB, "hello"),
-    {ok, "hello"} = gen_tcp:recv(ClientB, 0, ?TIMEOUT),
-
-    [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
-
-    exit(Pid1, shutdown),
-    exit(Pid2, {shutdown, oops}),
 
     receive {'EXIT', Pool, shutdown} -> ok end,
 

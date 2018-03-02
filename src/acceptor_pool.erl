@@ -85,7 +85,7 @@
 
 -type acceptor_spec() :: #{id := term(),
                            start := {module(), any(), [acceptor:option()]},
-                           restart => permanent | transient | temporary,
+                           restart => transient | temporary,
                            shutdown => timeout() | brutal_kill,
                            grace => timeout(),
                            type => worker | supervisor,
@@ -104,7 +104,7 @@
                 args :: any(),
                 id :: term(),
                 start :: {module(), any(), [acceptor:option()]},
-                restart :: permanent | transient | temporary,
+                restart :: transient | temporary,
                 shutdown :: timeout() | brutal_kill,
                 grace :: timeout(),
                 type :: worker | supervisor,
@@ -375,7 +375,7 @@ validate_spec(id, _) ->
 validate_spec(start, {AMod, _, Opts}) when is_atom(AMod), is_list(Opts) ->
     ok;
 validate_spec(restart, Restart)
-  when Restart == permanent; Restart == transient; Restart == temporary ->
+  when Restart == transient; Restart == temporary ->
     ok;
 validate_spec(shutdown, Shutdown) when is_integer(Shutdown), Shutdown >= 0 ->
     ok;
@@ -447,9 +447,6 @@ handle_exit(Pid, Reason, #state{conns=Conns} = State) ->
     end.
 
 % TODO: Send supervisor_reports like a supervisor
-child_exit(Pid, Reason, SockInfo, #state{restart=permanent} = State) ->
-    report(child_terminated, Pid, Reason, SockInfo, State),
-    add_restart(State);
 child_exit(_, normal, _, State) ->
     {noreply, State};
 child_exit(_, shutdown, _, State) ->
@@ -493,8 +490,8 @@ acceptor_exit(Pid, Reason, #state{acceptors=Acceptors} = State) ->
             % we are waiting for listen socket 'DOWN' to cancel accepting and
             % don't want accept errors to bring down pool. The acceptor will
             % have sent exit signal to listen socket, hopefully isolating the
-            % pool from a bad listen socket. With permanent restart or
-            % acceptor_terminate/2 crash the max intensity can still be reached.
+            % pool from a bad listen socket. With acceptor_terminate/2
+            % crash the max intensity can still be reached.
             NState = State#state{acceptors=NAcceptors},
             child_exit(Pid, Reason, SockInfo, NState);
         error ->
@@ -610,7 +607,6 @@ handle_down(Reason, Status, Restart, Reports) ->
         report -> dict:update_counter(Reason, 1, Reports)
     end.
 
-down_action(_, grace, permanent)      -> report;
 down_action(normal, _, _)             -> ignore;
 down_action(shutdown, _, _)           -> ignore;
 down_action({shutdown, _}, _, _)      -> ignore;
