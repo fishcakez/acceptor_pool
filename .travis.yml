@@ -2,4 +2,5 @@ language: erlang
 sudo: false
 otp_release:
     - 19.0
-script: "rebar compile ct"
+    - 20.0
+script: "rebar3 test"
