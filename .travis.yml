@@ -3,4 +3,4 @@ sudo: false
 otp_release:
     - 19.0
     - 20.0
-script: "rebar3 test"
+script: "rebar3 do xref, ct, dialyzer"
