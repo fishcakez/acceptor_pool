@@ -225,7 +225,8 @@ handle_init(Other) ->
 success(Sock, Opts, Parent, #{ack := AckRef} = Data) ->
     case inet:peername(Sock) of
         {ok, PeerName} ->
-            _ = Parent ! {'ACCEPT', self(), AckRef, PeerName},
+            {ok, SockName} = inet:sockname(Sock),
+            _ = Parent ! {'ACCEPT', self(), AckRef, SockName, PeerName},
             continue(Sock, Opts, PeerName, Data);
         {error, Reason} ->
             gen_tcp:close(Sock),
