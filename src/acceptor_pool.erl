@@ -254,10 +254,13 @@ handle_cast(Req, State) ->
 %% @private
 handle_info({'EXIT', Conn, Reason}, State) ->
     handle_exit(Conn, Reason, State);
-handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
+handle_info({'ACCEPT', Pid, AcceptRef, SockName, PeerName}, State) ->
     #state{acceptors=Acceptors, conns=Conns} = State,
     case maps:take(Pid, Acceptors) of
-        {{SockRef, SockName, AcceptRef}, NAcceptors} ->
+        %% we ignore the sock name from the acceptor, because it could
+        %% be {0,0,0,0}, and we want to know which interface the
+        %% socket was opened on.
+        {{SockRef, _ListenSockName, AcceptRef}, NAcceptors} ->
             NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
             NConns = Conns#{Pid => {PeerName, SockName, AcceptRef}},
             {noreply, State#state{acceptors=NAcceptors2, conns=NConns}};

@@ -22,6 +22,7 @@
          close_socket/1,
          which_sockets/1,
          which_children/1,
+         which_interface/1,
          count_children/1,
          format_status/1,
          start_error/1,
@@ -47,7 +48,8 @@ all() ->
 
 groups() ->
     [{tcp, [parallel], [accept, close_socket, which_sockets]},
-     {supervisor, [parallel], [which_children, count_children, format_status]},
+     {supervisor, [parallel], [which_children, which_interface,
+                               count_children, format_status]},
      {transient, [start_error, child_error, transient_shutdown]},
      {temporary, [start_error]},
      {shutdown_timeout, [parallel],
@@ -103,7 +105,12 @@ init_per_testcase(_TestCase, Config) ->
     {ok, Pool} = acceptor_pool_test:start_link(Spec),
     {ok, Ref} = acceptor_pool:accept_socket(Pool, LSock, 1),
     Connect = fun() -> gen_tcp:connect("localhost", Port, Opts, ?TIMEOUT) end,
-    [{connect, Connect}, {pool, Pool}, {ref, Ref}, {socket, LSock} | Config].
+    ConnectHost = fun(Host) -> gen_tcp:connect(Host, Port, Opts, ?TIMEOUT) end,
+    [{connect, Connect},
+     {connect_host, ConnectHost},
+     {pool, Pool},
+     {ref, Ref},
+     {socket, LSock} | Config].
 
 end_per_testcase(_TestCase, _Config) ->
     ok.
@@ -177,6 +184,32 @@ which_children(Config) ->
     ok = gen_tcp:close(ClientA),
 
     receive {'DOWN', Ref, _, _, _} -> ok end,
+
+    [] = acceptor_pool:which_children(Pool),
+
+    ok.
+
+which_interface(Config) ->
+    Pool = ?config(pool, Config),
+
+    [] = acceptor_pool:which_children(Pool),
+
+    Connect = ?config(connect_host, Config),
+
+    {ok, IFs} = inet:getif(),
+    [begin
+         {ok, Client} = Connect(Host),
+
+         ok = gen_tcp:send(Client, "hello"),
+         {ok, "hello"} = gen_tcp:recv(Client, 0, ?TIMEOUT),
+
+         [{{acceptor_pool_test, {_, _}, {Host, Port}, _}, Pid, worker,
+           [acceptor_pool_test]}] = acceptor_pool:which_children(Pool),
+
+         Ref = monitor(process, Pid),
+         ok = gen_tcp:close(Client),
+         receive {'DOWN', Ref, _, _, _} -> ok end
+     end || {Host, _GW, _BCast} <- IFs],
 
     [] = acceptor_pool:which_children(Pool),
 
