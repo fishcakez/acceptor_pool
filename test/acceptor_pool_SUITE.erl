@@ -332,7 +332,8 @@ shutdown_children(Config) ->
     [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
 
     {links, Links} = process_info(Pool, links),
-    [Acceptor] = Links -- [Pid1, Pid2, self()],
+    LSock = ?config(socket, Config),
+    [Acceptor] = Links -- [Pid1, Pid2, self(), LSock],
 
     Ref1 = monitor(process, Pid1),
     Ref2 = monitor(process, Pid2),
@@ -369,7 +370,8 @@ kill_children(Config) ->
     [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
 
     {links, Links} = process_info(Pool, links),
-    [Acceptor] = Links -- [Pid1, Pid2, self()],
+    LSock = ?config(socket, Config),
+    [Acceptor] = Links -- [Pid1, Pid2, self(), LSock],
 
     Ref1 = monitor(process, Pid1),
     Ref2 = monitor(process, Pid2),
@@ -378,11 +380,7 @@ kill_children(Config) ->
     _ = process_flag(trap_exit, true),
     exit(Pool, shutdown),
 
-    Shutdown = ?config(shutdown, Config),
-    receive
-        {'DOWN', ARef, _, _, shutdown} when Shutdown /= brutal_kill -> ok;
-        {'DOWN', ARef, _, _, killed} when Shutdown == brutal_kill -> ok
-    end,
+    receive {'DOWN', ARef, _, _, killed} -> ok end,
     receive {'DOWN', Ref1, _, _, killed} -> ok end,
     receive {'DOWN', Ref2, _, _, killed} -> ok end,
 
@@ -405,7 +403,8 @@ grace_children(Config) ->
     [{_, Pid1, _, _}, {_, Pid2, _, _}] = acceptor_pool:which_children(Pool),
 
     {links, Links} = process_info(Pool, links),
-    [Acceptor] = Links -- [Pid1, Pid2, self()],
+    LSock = ?config(socket, Config),
+    [Acceptor] = Links -- [Pid1, Pid2, self(), LSock],
 
     Ref1 = monitor(process, Pid1),
     Ref2 = monitor(process, Pid2),
