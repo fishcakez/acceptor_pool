@@ -167,7 +167,13 @@ start_link(Name, Module, Args) ->
       Reason :: inet:posix().
 accept_socket(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
-    gen_server:call(Pool, {accept_socket, Sock, Acceptors}, infinity).
+    case gen_server:call(Pool, {accept_socket, Sock, Acceptors}, infinity) of
+        {ok, _}=R ->
+            ok = gen_tcp:controlling_process(Sock, Pool),
+            R;
+        {error, _}=E ->
+            E
+    end.
 
 %% @doc List the listen sockets being used by the `acceptor_pool'.
 -spec which_sockets(Pool) -> [{SockModule, SockName, Sock, Ref}] when
