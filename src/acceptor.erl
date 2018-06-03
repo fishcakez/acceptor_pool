@@ -158,10 +158,10 @@ init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
     _ = put('$initial_call', {Mod, init, 3}),
     try Mod:acceptor_init(SockName, LSock, Args) of
         Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName)
     catch
         throw:Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef);
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName);
         error:Reason ->
             exit({Reason, erlang:get_stacktrace()})
     end.
@@ -204,17 +204,17 @@ spawn_options(Opts) ->
         false          -> [link]
     end.
 
-handle_init({ok, State}, Mod, SockMod, LSock, Parent, AckRef) ->
-    handle_init({ok, State, infinity}, Mod, SockMod, LSock, Parent, AckRef);
-handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef) ->
+handle_init({ok, State}, Mod, SockMod, LSock, Parent, AckRef, SockName) ->
+    handle_init({ok, State, infinity}, Mod, SockMod, LSock, Parent, AckRef, SockName);
+handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef, SockName) ->
     Data = #{module => Mod, state => State, socket_module => SockMod,
-             socket => LSock, ack => AckRef},
+             socket => LSock, ack => AckRef, sockname => SockName},
     % Use another module to accept so can reload this module.
     acceptor_loop:accept(LSock, Timeout, Parent, ?MODULE, Data);
-handle_init(ignore, _, _, _, Parent, AckRef) ->
+handle_init(ignore, _, _, _, Parent, AckRef, _) ->
     _ = Parent ! {'IGNORE', self(), AckRef},
     exit(normal);
-handle_init(Other, _, _, _, _, _) ->
+handle_init(Other, _, _, _, _, _, _) ->
     handle_init(Other).
 
 handle_init({error, Reason}) ->
@@ -222,16 +222,27 @@ handle_init({error, Reason}) ->
 handle_init(Other) ->
     exit({bad_return_value, Other}).
 
-success(Sock, Opts, Parent, #{ack := AckRef} = Data) ->
+success(Sock, Opts, Parent, Data) ->
     case inet:peername(Sock) of
         {ok, PeerName} ->
-            {ok, SockName} = inet:sockname(Sock),
-            _ = Parent ! {'ACCEPT', self(), AckRef, SockName, PeerName},
+            AcceptMsg = accept_message(Sock, PeerName, Data),
+            _ = Parent ! AcceptMsg,
             continue(Sock, Opts, PeerName, Data);
         {error, Reason} ->
             gen_tcp:close(Sock),
             failure(Reason, Data)
     end.
+
+accept_message(Sock, PeerName, #{ack := AckRef,
+                                 sockname := {{0,0,0,0}, _}}) ->
+    case inet:sockname(Sock) of
+        {ok, SockName} ->
+            {'ACCEPT', self(), AckRef, SockName, PeerName};
+        _ ->
+            {'ACCEPT', self(), AckRef, PeerName}
+    end;
+accept_message(_, PeerName, #{ack := AckRef}) ->
+    {'ACCEPT', self(), AckRef, PeerName}.
 
 continue(Sock, Opts, PeerName, Data) ->
     #{socket_module := SockMod, module := Mod, state := State} = Data,

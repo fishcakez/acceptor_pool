@@ -254,6 +254,16 @@ handle_cast(Req, State) ->
 %% @private
 handle_info({'EXIT', Conn, Reason}, State) ->
     handle_exit(Conn, Reason, State);
+handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
+    #state{acceptors=Acceptors, conns=Conns} = State,
+    case maps:take(Pid, Acceptors) of
+        {{SockRef, ListenSockName, AcceptRef}, NAcceptors} ->
+            NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
+            NConns = Conns#{Pid => {PeerName, ListenSockName, AcceptRef}},
+            {noreply, State#state{acceptors=NAcceptors2, conns=NConns}};
+        error ->
+            {noreply, State}
+    end;
 handle_info({'ACCEPT', Pid, AcceptRef, SockName, PeerName}, State) ->
     #state{acceptors=Acceptors, conns=Conns} = State,
     case maps:take(Pid, Acceptors) of
