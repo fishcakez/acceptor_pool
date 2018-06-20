@@ -154,6 +154,19 @@ spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) ->
 %% private api
 
 %% @private
+-ifdef(OTP_RELEASE).
+init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
+    _ = put('$initial_call', {Mod, init, 3}),
+    try Mod:acceptor_init(SockName, LSock, Args) of
+        Result ->
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
+    catch
+        throw:Result ->
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef);
+        error:Reason:Stacktrace ->
+            exit({Reason, Stacktrace})
+    end.
+-else.
 init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
     _ = put('$initial_call', {Mod, init, 3}),
     try Mod:acceptor_init(SockName, LSock, Args) of
@@ -165,6 +178,7 @@ init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
         error:Reason ->
             exit({Reason, erlang:get_stacktrace()})
     end.
+-endif.
 
 %% acceptor_loop api
 
@@ -261,6 +275,16 @@ failure(Reason, #{socket := LSock} = Data) ->
     end.
 
 -spec terminate(any(), data()) -> no_return().
+-ifdef(OTP_RELEASE).
+terminate(Reason, #{module := Mod, state := State} = Data) ->
+    try Mod:acceptor_terminate(Reason, State) of
+        _             -> terminated(Reason, Data)
+    catch
+        throw:_       -> terminated(Reason, Data);
+        exit:NReason  -> terminated(NReason, Data);
+        error:NReason:Stacktrace -> terminated({NReason, Stacktrace}, Data)
+    end.
+-else.
 terminate(Reason, #{module := Mod, state := State} = Data) ->
     try Mod:acceptor_terminate(Reason, State) of
         _             -> terminated(Reason, Data)
@@ -269,6 +293,7 @@ terminate(Reason, #{module := Mod, state := State} = Data) ->
         exit:NReason  -> terminated(NReason, Data);
         error:NReason -> terminated({NReason, erlang:get_stacktrace()}, Data)
     end.
+-endif.
 
 terminated(normal, _) ->
     exit(normal);
