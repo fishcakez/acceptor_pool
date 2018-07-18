@@ -1,6 +1,10 @@
 language: erlang
 sudo: false
 otp_release:
-    - 19.0
-    - 20.0
-script: "rebar3 do xref, ct, dialyzer"
+    - 21.0.2
+    - 20.3
+    - 19.3
+script:
+- wget -c https://github.com/erlang/rebar3/releases/download/3.6.1/rebar3 
+- chmod +x rebar3
+- ./rebar3 do xref, ct, dialyzer
