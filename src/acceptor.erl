@@ -159,10 +159,10 @@ init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
     _ = put('$initial_call', {Mod, init, 3}),
     try Mod:acceptor_init(SockName, LSock, Args) of
         Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef)
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName)
     catch
         throw:Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef);
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName);
         error:Reason:Stacktrace ->
             exit({Reason, Stacktrace})
     end.
