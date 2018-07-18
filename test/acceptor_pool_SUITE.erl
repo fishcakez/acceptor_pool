@@ -203,7 +203,7 @@ which_interface(Config) ->
          ok = gen_tcp:send(Client, "hello"),
          {ok, "hello"} = gen_tcp:recv(Client, 0, ?TIMEOUT),
 
-         [{{acceptor_pool_test, {_, _}, {Host, Port}, _}, Pid, worker,
+         [{{acceptor_pool_test, {_, _}, {Host, _Port}, _}, Pid, worker,
            [acceptor_pool_test]}] = acceptor_pool:which_children(Pool),
 
          Ref = monitor(process, Pid),
