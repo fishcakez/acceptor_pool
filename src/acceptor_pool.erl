@@ -168,9 +168,9 @@ start_link(Name, Module, Args) ->
 accept_socket(Pool, Sock, Acceptors)
   when is_port(Sock), is_integer(Acceptors), Acceptors > 0 ->
     case gen_server:call(Pool, {accept_socket, Sock, Acceptors}, infinity) of
-        {ok, _}=R ->
-            ok = gen_tcp:controlling_process(Sock, Pool),
-            R;
+        {ok, SockRef, SockPid} ->
+            ok = gen_tcp:controlling_process(Sock, SockPid),
+            {ok, SockRef};
         {error, _}=E ->
             E
     end.
@@ -236,7 +236,7 @@ handle_call({accept_socket, Sock, NumAcceptors}, _, State) ->
     case socket_info(Sock) of
         {ok, SockInfo} ->
             NState = start_acceptors(SockRef, SockInfo, NumAcceptors, State),
-            {reply, {ok, SockRef}, NState};
+            {reply, {ok, SockRef, self()}, NState};
         {error, _} = Error ->
             demonitor(SockRef, [flush]),
             {reply, Error, State}
