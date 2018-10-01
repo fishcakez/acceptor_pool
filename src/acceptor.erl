@@ -317,5 +317,5 @@ terminated(Reason, #{module := Mod, state := State}) ->
     Msg = "** Acceptor ~p terminating~n"
           "** When acceptor state == ~p~n"
           "** Reason for termination ==~n** ~p~n",
-    error_logger:format(Msg, [{self(), Mod}, State]),
+    error_logger:format(Msg, [{self(), Mod}, State, Reason]),
     exit(Reason).
