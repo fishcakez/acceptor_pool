@@ -324,7 +324,14 @@ format_status(_, [_, #state{mod=Mod} = State]) ->
 terminate(_, State) ->
     #state{conns=Conns, acceptors=Acceptors, grace=Grace, shutdown=Shutdown,
            restart=Restart, name=Name, id=Id, start={AMod, _, _},
+           sockets=Sockets,
            type=Type} = State,
+    case maps:values(Sockets) of
+        [] ->
+            ok;
+        SocketsList ->
+            [gen_tcp:close(Sock) || {_SockMod, _SockName, Sock} <- SocketsList]
+    end,
     Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
     MRefs = maps:from_list([{monitor(process, Pid), Pid} || Pid <- Pids]),
     Timer = grace_timer(Grace, Shutdown),
