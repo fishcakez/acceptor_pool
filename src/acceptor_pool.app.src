@@ -1,6 +1,6 @@
 {application, acceptor_pool,
  [{description, "A tcp acceptor pool library"},
-  {vsn, "1.0.0-rc.0"},
+  {vsn, "1.0.0"},
   {registered, []},
   {applications,
    [kernel,
