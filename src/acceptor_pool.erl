@@ -20,7 +20,7 @@
 %% @doc This module provides a `gen_tcp' acceptor pool supervisor. An
 %% `acceptor_pool' must define the `acceptor_pool' behaviour callback, which is
 %% very similar to the `supervisor' behaviour except all children must be
-%% `acceptor' proccesses and only the map terms are supported.
+%% `acceptor' processes and only the map terms are supported.
 %% The only callback is `init/1':
 %% ```
 %%-callback init(Args) -> {ok, {PoolFlags, [AcceptorSpec, ...]}} | ignore when

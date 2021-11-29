@@ -46,7 +46,7 @@
 %%
 %% To accept on the socket for `Timeout' timeout return
 %% `{ok, State, Timeout :: timeout()}' with `{ok, State}' and
-%% `{ok, State, hibernate}' being equivalent to `{ok, State, infinity}' wit the
+%% `{ok, State, hibernate}' being equivalent to `{ok, State, infinity}' with the
 %% later also causing the process to hibernate before trying to accept a
 %% connection. `State' will be passed to either `acceptor_continue/3' or
 %% `acceptor_continue/2'.
