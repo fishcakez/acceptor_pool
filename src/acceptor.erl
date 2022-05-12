@@ -244,7 +244,9 @@ success(Sock, Opts, Parent, Data) ->
             continue(Sock, Opts, PeerName, Data);
         {error, Reason} ->
             gen_tcp:close(Sock),
-            failure(Reason, Data)
+            %% don't call failure() here because it will
+            %% kill the listen socket, which is overkill here
+            terminate({shutdown, {error, Reason}}, Data)
     end.
 
 accept_message(Sock, PeerName, #{ack := AckRef,
