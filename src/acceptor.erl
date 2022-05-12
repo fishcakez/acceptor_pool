@@ -242,6 +242,10 @@ success(Sock, Opts, Parent, Data) ->
             AcceptMsg = accept_message(Sock, PeerName, Data),
             _ = Parent ! AcceptMsg,
             continue(Sock, Opts, PeerName, Data);
+        {error, enotconn} ->
+            %% the peer closed the connection already, just
+            %% drop it quietly
+            terminate({shutdown, normal}, Data);
         {error, Reason} ->
             gen_tcp:close(Sock),
             %% don't call failure() here because it will
