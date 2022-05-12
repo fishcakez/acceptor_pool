@@ -242,9 +242,15 @@ success(Sock, Opts, Parent, Data) ->
             AcceptMsg = accept_message(Sock, PeerName, Data),
             _ = Parent ! AcceptMsg,
             continue(Sock, Opts, PeerName, Data);
+        {error, enotconn} ->
+            %% the peer closed the connection already, just
+            %% drop it quietly
+            terminate({shutdown, normal}, Data);
         {error, Reason} ->
             gen_tcp:close(Sock),
-            failure(Reason, Data)
+            %% don't call failure() here because it will
+            %% kill the listen socket, which is overkill here
+            terminate({shutdown, {error, Reason}}, Data)
     end.
 
 accept_message(Sock, PeerName, #{ack := AckRef,
@@ -264,9 +270,15 @@ continue(Sock, Opts, PeerName, Data) ->
     case inet:setopts(Sock, Opts) of
         ok ->
             Mod:acceptor_continue(PeerName, Sock, State);
+        {error, enotconn} ->
+            %% the peer closed the connection already, just
+            %% drop it quietly
+            terminate({shutdown, normal}, Data);
         {error, Reason} ->
             gen_tcp:close(Sock),
-            failure(Reason, Data)
+            %% don't call failure() here because it will
+            %% kill the listen socket, which is overkill here
+            terminate({shutdown, {error, Reason}}, Data)
     end.
 
 -spec failure(timeout | closed | system_limit | inet:posix(), pid(), data()) ->
