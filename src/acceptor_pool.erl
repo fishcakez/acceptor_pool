@@ -77,6 +77,13 @@
 -export([format_status/2]).
 -export([terminate/2]).
 
+%% cached connections api
+-export([save_conn/5,
+         take_conn/2,
+         saved_conns/1,
+         delete_conn/2,
+         num_conns/1]).
+
 -type pool() :: pid() | atom() | {atom(), node()} | {via, module(), any()} |
                 {global, any()}.
 
@@ -215,6 +222,31 @@ which_children(Pool) ->
 count_children(Pool) ->
     gen_server:call(Pool, count_children, infinity).
 
+-spec save_conn(pool(), pid(), name(), name(), reference()) -> ok.
+save_conn(Pool, Pid, PeerName, SockName, AcceptRef) ->
+    true = ets:insert(Pool, {Pid, PeerName, SockName, AcceptRef}).
+
+-spec saved_conns(pool()) -> #{pid() => {name(), name(), reference()}}.
+saved_conns(Pool) ->
+    maps:from_list(ets:tab2list(Pool)).
+
+-spec take_conn(pool(), pid()) -> {ok, {name(), name(), reference()}} | error.
+take_conn(Pool, Pid) ->
+    case ets:take(Pool, Pid) of
+        [{Pid, PeerName, SocketName, AcceptRef}] ->
+            {ok, {PeerName, SocketName, AcceptRef}};
+        _ ->
+            error
+    end.
+
+-spec delete_conn(pool(), pid()) -> ok.
+delete_conn(Pool, Pid) ->
+    true = ets:delete(Pool, Pid).
+
+-spec num_conns(pool()) -> non_neg_integer().
+num_conns(Pool) ->
+    length(ets:tab2list(Pool)).
+
 %% gen_server api
 
 %% @private
@@ -246,7 +278,8 @@ handle_call(which_sockets, _, #state{sockets=Sockets} = State) ->
              {SockRef, {SockMod, SockName, Sock}} <- maps:to_list(Sockets)],
     {reply, Reply, State};
 handle_call(which_children, _, State) ->
-    #state{conns=Conns, id=Id, type=Type, modules=Modules} = State,
+    #state{id=Id, type=Type, modules=Modules, name=Name} = State,
+    Conns = ?MODULE:saved_conns(Name),
     Children = [{{Id, PeerName, SockName, Ref}, Pid, Type, Modules} ||
                 {Pid, {PeerName, SockName, Ref}} <- maps:to_list(Conns)],
     {reply, Children, State};
@@ -261,25 +294,25 @@ handle_cast(Req, State) ->
 handle_info({'EXIT', Conn, Reason}, State) ->
     handle_exit(Conn, Reason, State);
 handle_info({'ACCEPT', Pid, AcceptRef, PeerName}, State) ->
-    #state{acceptors=Acceptors, conns=Conns} = State,
+    #state{acceptors=Acceptors, name = Name} = State,
     case maps:take(Pid, Acceptors) of
         {{SockRef, ListenSockName, AcceptRef}, NAcceptors} ->
             NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
-            NConns = Conns#{Pid => {PeerName, ListenSockName, AcceptRef}},
-            {noreply, State#state{acceptors=NAcceptors2, conns=NConns}};
+            ok = ?MODULE:save_conn(Name, Pid, PeerName, ListenSockName, AcceptRef),
+            {noreply, State#state{acceptors=NAcceptors2}};
         error ->
             {noreply, State}
     end;
 handle_info({'ACCEPT', Pid, AcceptRef, SockName, PeerName}, State) ->
-    #state{acceptors=Acceptors, conns=Conns} = State,
+    #state{acceptors=Acceptors,name=Name} = State,
     case maps:take(Pid, Acceptors) of
         %% we ignore the sock name from the acceptor, because it could
         %% be {0,0,0,0}, and we want to know which interface the
         %% socket was opened on.
         {{SockRef, _ListenSockName, AcceptRef}, NAcceptors} ->
             NAcceptors2 = start_acceptor(SockRef, NAcceptors, State),
-            NConns = Conns#{Pid => {PeerName, SockName, AcceptRef}},
-            {noreply, State#state{acceptors=NAcceptors2, conns=NConns}};
+            ok = ?MODULE:save_conn(Name, Pid, PeerName, SockName, AcceptRef),
+            {noreply, State#state{acceptors=NAcceptors2}};
         error ->
             {noreply, State}
     end;
@@ -322,13 +355,15 @@ format_status(_, [_, #state{mod=Mod} = State]) ->
 
 %% @private
 terminate(_, State) ->
-    #state{conns=Conns, acceptors=Acceptors, grace=Grace, shutdown=Shutdown,
+    #state{acceptors=Acceptors, grace=Grace, shutdown=Shutdown,
            restart=Restart, name=Name, id=Id, start={AMod, _, _},
            type=Type} = State,
+    Conns = ?MODULE:saved_conns(Name),
     Pids = maps:keys(Acceptors) ++ maps:keys(Conns),
     MRefs = maps:from_list([{monitor(process, Pid), Pid} || Pid <- Pids]),
     Timer = grace_timer(Grace, Shutdown),
     Reports = await_down(Timer, Restart, MRefs),
+    _ = ets:delete(Name),
     terminate_report(Name, Id, AMod, Restart, Shutdown, Type, Reports).
 
 %% internal
@@ -350,6 +385,7 @@ init(Name, Mod, Args, {ok, {#{} = Flags, [#{} = Spec]}}) ->
                            restart=Restart, shutdown=Shutdown, grace=Grace,
                            type=Type, modules=Modules, intensity=Intensity,
                            period=Period},
+            _ = make_ets_conn_cache(Name),
             {ok, State};
         {error, Reason} ->
             {stop, Reason}
@@ -358,6 +394,17 @@ init(_, _, _, ignore) ->
     ignore;
 init(_, Mod, _, Other) ->
     {stop, {bad_return, {Mod, init, Other}}}.
+
+-spec make_ets_conn_cache(atom()) -> atom().
+make_ets_conn_cache(Name) ->
+    Tab1 = ets:new(
+        Name,
+        [
+            named_table,
+            public
+        ]
+    ),
+    Tab1.
 
 validate_config(Flags, Spec) ->
     case validate_flags(Flags) of
@@ -413,7 +460,8 @@ validate_spec(Key, Value) ->
 shutdown_default(worker)     -> 5000;
 shutdown_default(supervisor) -> infinity.
 
-count(#state{conns=Conns, acceptors=Acceptors, type=Type}) ->
+count(#state{acceptors=Acceptors, type=Type, name=Name}) ->
+    Conns = saved_conns(Name),
     Active = maps:size(Conns),
     Size = Active + maps:size(Acceptors),
     case Type of
@@ -447,20 +495,20 @@ start_loop(SockRef, N, Acceptors, State) ->
     start_loop(SockRef, N-1, start_acceptor(SockRef, Acceptors, State), State).
 
 start_acceptor(SockRef, Acceptors,
-               #state{sockets=Sockets, start={Mod, Args, Opts}}) ->
+               #state{name = Name, sockets=Sockets, start={Mod, Args, Opts}}) ->
     case Sockets of
         #{SockRef := {SockMod, SockName, Sock}} ->
             {Pid, AcceptRef} =
-                acceptor:spawn_opt(Mod, SockMod, SockName, Sock, Args, Opts),
+                acceptor:spawn_opt(Name, Mod, SockMod, SockName, Sock, Args, Opts),
             Acceptors#{Pid => {SockRef, SockName, AcceptRef}};
         _ ->
             Acceptors
     end.
 
-handle_exit(Pid, Reason, #state{conns=Conns} = State) ->
-    case maps:take(Pid, Conns) of
-        {SockInfo, NConns} ->
-            child_exit(Pid, Reason, SockInfo, State#state{conns=NConns});
+handle_exit(Pid, Reason, #state{name=Name} = State) ->
+    case ?MODULE:take_conn(Name, Pid) of
+        {ok, SockInfo} ->
+            child_exit(Pid, Reason, SockInfo, State);
         error ->
             acceptor_exit(Pid, Reason, State)
     end.
@@ -548,11 +596,11 @@ drop_restarts(Stale, Restarts) ->
 
 change_init(Result, State) ->
     #state{name=Name, mod=Mod, args=Args, restarts=Restarts, sockets=Sockets,
-           acceptors=Acceptors, conns=Conns} = State,
+           acceptors=Acceptors} = State,
     case init(Name, Mod, Args, Result) of
         {ok, NState} ->
             {ok, NState#state{restarts=Restarts, sockets=Sockets,
-                              acceptors=Acceptors, conns=Conns}};
+                              acceptors=Acceptors}};
         ignore ->
             {ok, State};
         {stop, Reason} ->

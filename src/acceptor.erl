@@ -93,11 +93,11 @@
 
 %% public api
 
--export([spawn_opt/6]).
+-export([spawn_opt/7]).
 
 %% private api
 
--export([init_it/7]).
+-export([init_it/8]).
 
 %% acceptor_loop api
 
@@ -136,7 +136,8 @@
 %% public api
 
 %% @private
--spec spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) -> {Pid, Ref} when
+-spec spawn_opt(Name, Mod, SockMod, SockName, LSock, Args, Opts) -> {Pid, Ref} when
+      Name :: atom(),
       Mod :: module(),
       SockMod :: module(),
       SockName :: acceptor_pool:name(),
@@ -145,9 +146,9 @@
       Opts :: [option()],
       Pid :: pid(),
       Ref :: reference().
-spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) ->
+spawn_opt(Name, Mod, SockMod, SockName, LSock, Args, Opts) ->
     AckRef = make_ref(),
-    SArgs = [self(), AckRef, Mod, SockMod, SockName, LSock, Args],
+    SArgs = [self(), Name, AckRef, Mod, SockMod, SockName, LSock, Args],
     Pid = proc_lib:spawn_opt(?MODULE, init_it, SArgs, spawn_options(Opts)),
     {Pid, AckRef}.
 
@@ -155,26 +156,26 @@ spawn_opt(Mod, SockMod, SockName, LSock, Args, Opts) ->
 
 %% @private
 -ifdef(OTP_RELEASE).
-init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
+init_it(Parent, Name, AckRef, Mod, SockMod, SockName, LSock, Args) ->
     _ = put('$initial_call', {Mod, init, 3}),
-    try Mod:acceptor_init(SockName, LSock, Args) of
+    try Mod:acceptor_init(Name, SockName, LSock, Args) of
         Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName)
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName, Name)
     catch
         throw:Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName);
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName, Name);
         error:Reason:Stacktrace ->
             exit({Reason, Stacktrace})
     end.
 -else.
-init_it(Parent, AckRef, Mod, SockMod, SockName, LSock, Args) ->
+init_it(Parent, Name, AckRef, Mod, SockMod, SockName, LSock, Args) ->
     _ = put('$initial_call', {Mod, init, 3}),
-    try Mod:acceptor_init(SockName, LSock, Args) of
+    try Mod:acceptor_init(Name, SockName, LSock, Args) of
         Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName)
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName, Name)
     catch
         throw:Result ->
-            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName);
+            handle_init(Result, Mod, SockMod, LSock, Parent, AckRef, SockName, Name);
         error:Reason ->
             exit({Reason, erlang:get_stacktrace()})
     end.
@@ -218,17 +219,17 @@ spawn_options(Opts) ->
         false          -> [link]
     end.
 
-handle_init({ok, State}, Mod, SockMod, LSock, Parent, AckRef, SockName) ->
-    handle_init({ok, State, infinity}, Mod, SockMod, LSock, Parent, AckRef, SockName);
-handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef, SockName) ->
+handle_init({ok, State}, Mod, SockMod, LSock, Parent, AckRef, SockName, Name) ->
+    handle_init({ok, State, infinity}, Mod, SockMod, LSock, Parent, AckRef, SockName, Name);
+handle_init({ok, State, Timeout}, Mod, SockMod, LSock, Parent, AckRef, SockName, Name) ->
     Data = #{module => Mod, state => State, socket_module => SockMod,
-             socket => LSock, ack => AckRef, sockname => SockName},
+             socket => LSock, ack => AckRef, sockname => SockName, pool_name => Name},
     % Use another module to accept so can reload this module.
     acceptor_loop:accept(LSock, Timeout, Parent, ?MODULE, Data);
-handle_init(ignore, _, _, _, Parent, AckRef, _) ->
+handle_init(ignore, _, _, _, Parent, AckRef, _, _) ->
     _ = Parent ! {'IGNORE', self(), AckRef},
     exit(normal);
-handle_init(Other, _, _, _, _, _, _) ->
+handle_init(Other, _, _, _, _, _, _, _) ->
     handle_init(Other).
 
 handle_init({error, Reason}) ->
@@ -265,11 +266,12 @@ accept_message(_, PeerName, #{ack := AckRef}) ->
     {'ACCEPT', self(), AckRef, PeerName}.
 
 continue(Sock, Opts, PeerName, Data) ->
-    #{socket_module := SockMod, module := Mod, state := State} = Data,
+    #{socket_module := SockMod, module := Mod, state := State,
+        pool_name := PoolName} = Data,
     _ = inet_db:register_socket(Sock, SockMod),
     case inet:setopts(Sock, Opts) of
         ok ->
-            Mod:acceptor_continue(PeerName, Sock, State);
+            Mod:acceptor_continue(PoolName, PeerName, Sock, State);
         {error, enotconn} ->
             %% the peer closed the connection already, just
             %% drop it quietly
