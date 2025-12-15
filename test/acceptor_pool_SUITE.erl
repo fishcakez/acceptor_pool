@@ -24,7 +24,6 @@
          which_children/1,
          which_interface/1,
          count_children/1,
-         format_status/1,
          start_error/1,
          child_error/1,
          transient_shutdown/1,
@@ -49,7 +48,7 @@ all() ->
 groups() ->
     [{tcp, [parallel], [accept, close_socket, which_sockets]},
      {supervisor, [parallel], [which_children, which_interface,
-                               count_children, format_status]},
+                               count_children]},
      {transient, [start_error, child_error, transient_shutdown]},
      {temporary, [start_error]},
      {shutdown_timeout, [parallel],
@@ -243,18 +242,6 @@ count_children(Config) ->
     % workers is 1 because 1 acceptor
     [{specs, 1}, {active, 0}, {supervisors, 0}, {workers, 1}] =
         acceptor_pool:count_children(Pool),
-
-    ok.
-
-format_status(Config) ->
-    Pool = ?config(pool, Config),
-
-    {status, Pool, {module, _}, Items} = sys:get_status(Pool),
-
-    [_PDict, running, _Parent, [], Misc] = Items,
-
-    {supervisor, [{"Callback", acceptor_pool_test}]} =
-        lists:keyfind(supervisor, 1, Misc),
 
     ok.
 

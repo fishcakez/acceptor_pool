@@ -74,7 +74,6 @@
 -export([handle_cast/2]).
 -export([handle_info/2]).
 -export([code_change/3]).
--export([format_status/2]).
 -export([terminate/2]).
 
 -type pool() :: pid() | atom() | {atom(), node()} | {via, module(), any()} |
@@ -313,12 +312,6 @@ code_change(_, #state{mod=Mod, args=Args} = State, _) ->
     catch
         throw:Result -> change_init(Result, State)
     end.
-
-%% @private
-format_status(terminate, [_, State]) ->
-    State;
-format_status(_, [_, #state{mod=Mod} = State]) ->
-    [{data, [{"State", State}]}, {supervisor, [{"Callback", Mod}]}].
 
 %% @private
 terminate(_, State) ->
